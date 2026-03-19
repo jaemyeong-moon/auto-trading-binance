@@ -1,0 +1,41 @@
+# Auto-Trader Configuration
+# Copy to settings.local.yaml for local overrides
+
+exchange:
+  name: binance
+  testnet: true  # Use testnet for development
+
+trading:
+  base_currency: USDT
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+  interval: 1h
+  max_open_positions: 3
+  position_size_pct: 0.1  # 10% of portfolio per trade
+
+strategy:
+  name: combined  # technical, ml, combined
+  technical:
+    indicators:
+      - rsi
+      - macd
+      - bollinger_bands
+    rsi_period: 14
+    rsi_oversold: 30
+    rsi_overbought: 70
+  ml:
+    model: xgboost  # xgboost, lstm
+    retrain_interval: 24h
+    lookback_periods: 100
+    confidence_threshold: 0.65
+
+risk:
+  stop_loss_pct: 0.03       # 3%
+  take_profit_pct: 0.06     # 6%
+  max_daily_loss_pct: 0.05  # 5% max daily drawdown
+  trailing_stop: false
+
+logging:
+  level: INFO
+  file: logs/trader.log

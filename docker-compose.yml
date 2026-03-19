@@ -1,0 +1,28 @@
+services:
+  # 트레이딩 봇 (선물 스캘퍼)
+  bot:
+    build: .
+    container_name: auto-trader-bot
+    command: python -m src.main
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./models:/app/models
+      - ./config:/app/config
+    restart: unless-stopped
+
+  # 대시보드 (Streamlit)
+  dashboard:
+    build: .
+    container_name: auto-trader-dashboard
+    command: streamlit run src/dashboard/app.py --server.headless true --server.port 8502 --server.address 0.0.0.0
+    env_file: .env
+    ports:
+      - "8502:8502"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./models:/app/models
+      - ./config:/app/config
+    restart: unless-stopped

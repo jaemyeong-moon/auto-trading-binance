@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environment
+.env*
+.venv/
+venv/
+
+# Config overrides
+config/settings.local.yaml
+
+# Data & logs
+data/*.db
+logs/*.log
+
+# IDE
+.vscode/
+.idea/
+
+# ML models
+models/*.pkl
+models/*.pt
+models/*.joblib
+
+# OS
+.DS_Store
+Thumbs.db
