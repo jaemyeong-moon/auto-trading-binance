@@ -10,7 +10,9 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from src.core.config import settings
 
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "trades.db"
+# testnet / real 환경별 DB 분리 — 모드 전환 시 데이터 유실 방지
+_db_name = "trades_testnet.db" if settings.exchange.testnet else "trades_real.db"
+DB_PATH = Path(__file__).parent.parent.parent / "data" / _db_name
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 DB_URL = f"sqlite:///{DB_PATH}"
 
@@ -30,8 +32,10 @@ class TradeRecord(Base):
     quantity = Column(Float, nullable=False)
     pnl = Column(Float, nullable=True)
     pnl_pct = Column(Float, nullable=True)
+    fee = Column(Float, nullable=True)          # 왕복 수수료 (USDT)
+    net_pnl = Column(Float, nullable=True)      # 순수익 (pnl - fee)
     strategy = Column(String, nullable=True)
-    opened_at = Column(DateTime, default=datetime.now)
+    opened_at = Column(DateTime, default=now_kst)
     closed_at = Column(DateTime, nullable=True)
 
 
@@ -44,7 +48,7 @@ class PositionRecord(Base):
     entry_price = Column(Float, nullable=False)
     quantity = Column(Float, nullable=False)
     strategy = Column(String, nullable=True)
-    opened_at = Column(DateTime, default=datetime.now)
+    opened_at = Column(DateTime, default=now_kst)
 
 
 class BotState(Base):
@@ -94,28 +98,47 @@ def open_position(
     return pos
 
 
-def close_position(symbol: str, exit_price: float) -> TradeRecord | None:
+def close_position(symbol: str, exit_price: float, fee: float = 0) -> TradeRecord | None:
     with get_session() as session:
         pos = session.query(PositionRecord).filter_by(symbol=symbol).first()
         if not pos:
             return None
 
         pnl = (exit_price - pos.entry_price) * pos.quantity
-        if pos.side == "SELL":
+        if pos.side == "SHORT":
             pnl = -pnl
         pnl_pct = (pnl / (pos.entry_price * pos.quantity)) * 100 if pos.entry_price > 0 else 0
+        net_pnl = pnl - fee
 
         trade = TradeRecord(
             symbol=symbol, side=pos.side, entry_price=pos.entry_price,
             exit_price=exit_price, quantity=pos.quantity,
-            pnl=pnl, pnl_pct=pnl_pct, strategy=pos.strategy,
-            closed_at=now_kst(),
+            pnl=pnl, pnl_pct=pnl_pct, fee=round(fee, 4), net_pnl=round(net_pnl, 4),
+            strategy=pos.strategy, closed_at=now_kst(),
         )
         session.add(trade)
         session.delete(pos)
         session.commit()
         session.refresh(trade)
         return trade
+
+
+def update_position_quantity(symbol: str, new_quantity: float) -> None:
+    """부분 익절 후 DB 포지션 수량 갱신."""
+    with get_session() as session:
+        pos = session.query(PositionRecord).filter_by(symbol=symbol).first()
+        if pos:
+            pos.quantity = new_quantity
+            session.commit()
+
+
+def delete_position(symbol: str) -> None:
+    """거래소에서 이미 청산된 포지션의 DB 레코드 정리."""
+    with get_session() as session:
+        pos = session.query(PositionRecord).filter_by(symbol=symbol).first()
+        if pos:
+            session.delete(pos)
+            session.commit()
 
 
 def get_open_positions() -> list[PositionRecord]:
@@ -190,6 +213,11 @@ _DEFAULT_SETTINGS = {
     "webhook_on_open": "true",       # 포지션 진입 시
     "webhook_on_close": "true",      # 포지션 청산 시
     "webhook_on_tp_sl": "true",      # 익절/손절 시
+    # AI Agent
+    "ai_agent_enabled": "true",      # AI 전략 에이전트 활성화
+    "ai_agent_interval": "120",      # 실행 주기 (틱 수, 기본 ~1시간)
+    "ai_agent_last_run": "",         # 마지막 실행 시각
+    "ai_agent_last_strategy": "",    # 마지막 생성 전략
 }
 
 
@@ -202,11 +230,19 @@ def get_setting(key: str) -> str:
 
 
 def get_setting_float(key: str) -> float:
-    return float(get_setting(key))
+    try:
+        return float(get_setting(key))
+    except (ValueError, TypeError):
+        default = _DEFAULT_SETTINGS.get(key, "0")
+        return float(default)
 
 
 def get_setting_int(key: str) -> int:
-    return int(float(get_setting(key)))
+    try:
+        return int(float(get_setting(key)))
+    except (ValueError, TypeError):
+        default = _DEFAULT_SETTINGS.get(key, "0")
+        return int(float(default))
 
 
 def set_setting(key: str, value: str) -> None:

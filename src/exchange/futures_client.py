@@ -143,6 +143,29 @@ class FuturesClient:
                 }
         return None
 
+    async def get_recent_fees(self, symbol: str, limit: int = 10) -> float:
+        """최근 거래의 수수료 합계 (마지막 포지션 왕복 수수료 추정)."""
+        try:
+            trades = await self.client.futures_account_trades(
+                symbol=symbol, limit=limit)
+            if not trades:
+                return 0.0
+            # 가장 최근 거래들의 수수료 합산 (같은 orderId 그룹)
+            # 마지막 2개 주문(진입+청산)의 수수료
+            order_ids = set()
+            total_fee = 0.0
+            for t in reversed(trades):
+                oid = t["orderId"]
+                if oid not in order_ids:
+                    order_ids.add(oid)
+                if len(order_ids) > 2:
+                    break
+                total_fee += float(t["commission"])
+            return total_fee
+        except Exception:
+            logger.exception("futures.fee_query_error", symbol=symbol)
+            return 0.0
+
     async def get_account_summary(self) -> dict:
         """Get account balance + total unrealized PnL."""
         balances = await self.client.futures_account_balance()

@@ -16,11 +16,11 @@ from src.core import database as db
 
 logger = structlog.get_logger()
 
-# 탐색 범위 (타이트~와이드 모두 포함)
-SL_RANGE = [0.3, 0.5, 0.7, 1.0, 1.3, 1.5]          # ATR 배수
-TP_RANGE = [0.5, 0.75, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0]  # ATR 배수
-TRAIL_ACT_RANGE = [0.5, 1.0, 1.5, 2.0]              # ATR 배수
-TRAIL_DIST_RANGE = [0.2, 0.3, 0.5, 0.7]             # ATR 배수
+# 탐색 범위 (SL 최소 1.0 — 수수료+스프레드 감안)
+SL_RANGE = [1.0, 1.5, 2.0, 2.5, 3.0]                 # ATR 배수
+TP_RANGE = [2.0, 3.0, 4.0, 5.0, 6.0]                 # ATR 배수
+TRAIL_ACT_RANGE = [2.0, 3.0, 4.0]                     # ATR 배수
+TRAIL_DIST_RANGE = [0.5, 1.0, 1.5]                    # ATR 배수
 
 COMMISSION = 0.0004  # 왕복 수수료
 
@@ -153,7 +153,7 @@ def _simulate_params(
     win_rate = len(wins) / len(trades_pnl) if trades_pnl else 0
     avg_win = np.mean(wins) if wins else 0
     avg_loss = abs(np.mean(losses)) if losses else 0.0001
-    avg_rr = avg_win / avg_loss
+    avg_rr = avg_win / avg_loss if avg_loss > 0 else 0
 
     # 종합 점수: profit_factor × win_rate × (1 - drawdown비율) × 거래수 보정
     trade_count_bonus = min(len(trades_pnl) / 10, 1.0)  # 최소 10건은 있어야 신뢰

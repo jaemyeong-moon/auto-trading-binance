@@ -44,7 +44,10 @@ class ExchangeConfig(BaseSettings):
         populate_by_name=True, extra="ignore",
     )
     name: str = _yaml.get("exchange", {}).get("name", "binance")
-    testnet: bool = _yaml.get("exchange", {}).get("testnet", True)
+    testnet: bool = Field(
+        default=_yaml.get("exchange", {}).get("testnet", True),
+        alias="BINANCE_TESTNET",
+    )
     api_key: str = Field(default="", alias="BINANCE_API_KEY")
     api_secret: str = Field(default="", alias="BINANCE_API_SECRET")
 

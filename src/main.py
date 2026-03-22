@@ -19,6 +19,13 @@ console = Console()
 async def _run() -> None:
     db.init_db()
 
+    # 기존 AI 생성 전략 로드
+    try:
+        from src.core.strategy_agent import load_all_ai_strategies
+        load_all_ai_strategies()
+    except ImportError:
+        pass  # anthropic 미설치 시 무시
+
     client = FuturesClient()
     await client.connect()
 
@@ -29,11 +36,19 @@ async def _run() -> None:
     for symbol in symbols:
         await engine.start_symbol(symbol)
 
+    ai_enabled = engine._ai_agent_enabled
+    strategy_name = db.get_setting("strategy")
     console.print("[bold green]⚡ Futures Scalper started[/bold green]")
     console.print(f"  Symbols: {symbols}")
-    console.print(f"  Leverage: 5x")
-    console.print(f"  Strategy: momentum_flip_scalper")
+    console.print(f"  Leverage: {db.get_setting('leverage')}x")
+    console.print(f"  Strategy: {strategy_name}")
     console.print(f"  Testnet: {settings.exchange.testnet}")
+    if ai_enabled:
+        from src.core.llm_provider import detect_provider
+        detected = detect_provider() or "unknown"
+        console.print(f"  AI Agent: [green]enabled[/green] (provider: {detected})")
+    else:
+        console.print("  AI Agent: [dim]disabled (set ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY)[/dim]")
 
     loop = asyncio.get_event_loop()
     stop_event = asyncio.Event()

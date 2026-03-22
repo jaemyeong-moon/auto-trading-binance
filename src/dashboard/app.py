@@ -138,6 +138,8 @@ def load_trades_df(symbol: str | None = None) -> pd.DataFrame:
         "ID": t.id, "심볼": t.symbol, "방향": t.side,
         "진입가": t.entry_price, "청산가": t.exit_price, "수량": t.quantity,
         "손익(USDT)": round(t.pnl, 2) if t.pnl else 0,
+        "수수료": round(t.fee, 4) if t.fee else 0,
+        "순손익": round(t.net_pnl, 2) if t.net_pnl else 0,
         "손익(%)": round(t.pnl_pct, 2) if t.pnl_pct else 0,
         "전략": t.strategy, "청산시간": t.closed_at,
     } for t in trades])
@@ -366,16 +368,19 @@ if page == "실시간 현황":
         st.info("체결된 거래가 없습니다.")
     else:
         total_pnl = trades_df["손익(USDT)"].sum()
+        total_fee = trades_df["수수료"].sum()
+        total_net = trades_df["순손익"].sum()
         total_count = len(trades_df)
-        win_count = len(trades_df[trades_df["손익(USDT)"] > 0])
-        lose_count = len(trades_df[trades_df["손익(USDT)"] < 0])
+        win_count = len(trades_df[trades_df["순손익"] > 0])
+        lose_count = len(trades_df[trades_df["순손익"] < 0])
         win_rate = (win_count / total_count * 100) if total_count > 0 else 0
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("실현 손익", f"${total_pnl:+,.2f}")
-        c2.metric("승률", f"{win_rate:.1f}%")
-        c3.metric("거래 수", f"{total_count}회")
-        c4.metric("수익/손실", f"{win_count}W / {lose_count}L")
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("순손익", f"${total_net:+,.2f}")
+        c2.metric("총 수수료", f"${total_fee:,.4f}")
+        c3.metric("승률", f"{win_rate:.1f}%")
+        c4.metric("거래 수", f"{total_count}회")
+        c5.metric("수익/손실", f"{win_count}W / {lose_count}L")
         st.dataframe(trades_df, use_container_width=True)
 
     if auto_refresh:
@@ -446,20 +451,31 @@ elif page == "거래 내역":
     if trades_df.empty:
         st.warning("거래 기록이 없습니다.")
     else:
+        # 총 수수료 / 순손익 요약
+        total_fee = trades_df["수수료"].sum()
+        total_net = trades_df["순손익"].sum()
+        total_gross = trades_df["손익(USDT)"].sum()
+        tc1, tc2, tc3, tc4 = st.columns(4)
+        tc1.metric("총 손익 (수수료 전)", f"${total_gross:+,.2f}")
+        tc2.metric("총 수수료", f"${total_fee:,.4f}")
+        tc3.metric("순손익 (수수료 후)", f"${total_net:+,.2f}")
+        tc4.metric("거래 수", f"{len(trades_df)}회")
+
         fig = go.Figure()
         fig.add_trace(go.Bar(
             x=list(range(len(trades_df))),
-            y=trades_df["손익(USDT)"].values,
+            y=trades_df["순손익"].values,
             marker_color=["#26a69a" if v >= 0 else "#ef5350"
-                          for v in trades_df["손익(USDT)"].values],
+                          for v in trades_df["순손익"].values],
         ))
-        fig.update_layout(title="거래별 손익", template="plotly_dark", height=300)
+        fig.update_layout(title="거래별 순손익 (수수료 차감)", template="plotly_dark", height=300)
         st.plotly_chart(fig, use_container_width=True)
 
         if sym is None:
             summary = trades_df.groupby("심볼").agg(
                 거래수=("ID", "count"), 총손익=("손익(USDT)", "sum"),
-                평균손익=("손익(USDT)", "mean"),
+                총수수료=("수수료", "sum"), 순손익=("순손익", "sum"),
+                평균손익=("순손익", "mean"),
             ).round(2)
             st.subheader("심볼별 요약")
             st.dataframe(summary, use_container_width=True)
@@ -536,11 +552,11 @@ elif page == "설정":
     with col2:
         leverage = st.select_slider(
             "레버리지",
-            options=[1, 2, 3, 5, 10, 15, 20, 25],
+            options=[1, 2, 3, 5, 7, 10, 15, 20, 25],
             value=int(float(s["leverage"])),
             help="높을수록 수익/손실이 증폭됩니다.",
         )
-        risk_map = {1: "매우 안전", 2: "안전", 3: "보통", 5: "공격적",
+        risk_map = {1: "매우 안전", 2: "안전", 3: "보통", 5: "공격적", 7: "공격적",
                     10: "매우 공격적", 15: "위험", 20: "고위험", 25: "극고위험"}
         risk_label = risk_map.get(leverage, "")
         risk_color = "#26a69a" if leverage <= 3 else "#ffa726" if leverage <= 10 else "#ef5350"

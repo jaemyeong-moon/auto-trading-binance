@@ -50,9 +50,14 @@ def _format_discord(event: str, data: dict) -> dict:
         "quantity": "수량",
         "invest_usdt": "투자금",
         "pnl_usdt": "손익(USDT)",
+        "fee_usdt": "수수료",
+        "net_pnl_usdt": "순수익",
         "reason": "사유",
         "change_pct": "변동(%)",
         "closed_quantity": "청산수량",
+        "balance_usdt": "계좌잔고",
+        "today_pnl_usdt": "오늘 수익",
+        "today_pnl_pct": "오늘 수익률",
     }
 
     for key, label in field_map.items():
@@ -150,15 +155,31 @@ async def notify_open(symbol: str, direction: str, price: float,
 
 
 async def notify_close(symbol: str, side: str, entry_price: float,
-                        exit_price: float, pnl: float, reason: str = "") -> None:
-    await send_webhook("close", {
+                        exit_price: float, pnl: float, reason: str = "",
+                        balance: float = 0, fee: float = 0,
+                        net_pnl: float = 0) -> None:
+    data = {
         "symbol": symbol,
         "side": side,
         "entry_price": entry_price,
         "exit_price": exit_price,
         "pnl_usdt": round(pnl, 2),
+        "fee_usdt": round(fee, 4),
+        "net_pnl_usdt": round(net_pnl, 2),
         "reason": reason,
-    })
+    }
+    if balance > 0:
+        data["balance_usdt"] = round(balance, 2)
+        # 오늘 누적 수익률 계산
+        trades = db.get_trades(limit=50)
+        today_pnl = sum(
+            t.pnl for t in trades
+            if t.pnl is not None and t.closed_at
+            and t.closed_at.date() == now_kst().date()
+        )
+        data["today_pnl_usdt"] = round(today_pnl, 2)
+        data["today_pnl_pct"] = f"{today_pnl / balance * 100:+.2f}%" if balance > 0 else "0%"
+    await send_webhook("close", data)
 
 
 async def notify_partial_tp(symbol: str, price: float,
@@ -169,3 +190,27 @@ async def notify_partial_tp(symbol: str, price: float,
         "closed_quantity": closed_qty,
         "change_pct": round(change_pct * 100, 2),
     })
+
+
+async def send_raw(message: str) -> None:
+    """단순 텍스트 메시지를 웹훅으로 전송."""
+    url = db.get_setting("webhook_url")
+    if not url:
+        return
+
+    platform = _detect_platform(url)
+
+    if platform == "discord":
+        payload = {"content": message}
+    elif platform == "slack":
+        payload = {"text": message}
+    else:
+        payload = {"message": message, "timestamp": now_kst().isoformat()}
+
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.post(url, json=payload)
+            if resp.status_code >= 400:
+                logger.warning("webhook.send_raw_failed", status=resp.status_code)
+    except Exception:
+        logger.exception("webhook.send_raw_error")

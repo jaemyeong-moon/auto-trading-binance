@@ -1,6 +1,7 @@
 """Futures trading engine — v1(always flip) + v2(signal only) 듀얼 모드."""
 
 import asyncio
+import os
 
 import pandas as pd
 import structlog
@@ -15,6 +16,9 @@ from src.strategies.registry import get_strategy
 
 logger = structlog.get_logger()
 
+# AI Agent 실행 주기 (틱 수 기준, 기본 tick=30초 × 120 = 약 1시간)
+AI_AGENT_INTERVAL_TICKS = 120
+
 
 class FuturesEngine:
     """선물 거래 엔진. 전략의 mode에 따라 실행 방식이 달라짐."""
@@ -23,6 +27,12 @@ class FuturesEngine:
         self.client = client
         self.strategies: dict[str, Strategy] = {}
         self._tasks: dict[str, asyncio.Task] = {}
+        self._ai_agent = None  # lazy init
+        self._ai_agent_enabled = bool(
+            os.environ.get("ANTHROPIC_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("GEMINI_API_KEY")
+        )
 
     async def start_symbol(self, symbol: str) -> None:
         if symbol in self._tasks and not self._tasks[symbol].done():
@@ -74,6 +84,10 @@ class FuturesEngine:
                 if tick_count % 20 == 1:
                     await self._run_auto_optimize(symbol)
 
+                # AI Agent: 주기적으로 전략 성과 분석 및 신규 전략 생성
+                if self._ai_agent_enabled and tick_count % AI_AGENT_INTERVAL_TICKS == 1:
+                    await self._run_ai_agent(symbol)
+
                 if strategy.mode == ExecutionMode.ALWAYS_FLIP:
                     await self._tick_always_flip(symbol, strategy)
                 else:
@@ -90,6 +104,68 @@ class FuturesEngine:
             tick_interval = db.get_setting_int("tick_interval")
             await asyncio.sleep(tick_interval)
 
+    async def _run_ai_agent(self, symbol: str) -> None:
+        """AI Agent 실행: 성과 분석 → 필요 시 신규 전략 생성 → 핫 스왑."""
+        try:
+            from src.core.strategy_agent import AIStrategyAgent
+
+            if self._ai_agent is None:
+                self._ai_agent = AIStrategyAgent()
+
+            # 백테스트 검증용 캔들
+            candles = await self.client.get_candles(symbol, interval="1m", limit=500)
+
+            # 시장 요약 (현재 가격, 변동성 등)
+            market_summary = ""
+            if len(candles) > 50:
+                close = candles["close"]
+                price = close.iloc[-1]
+                change_1h = ((price - close.iloc[-60]) / close.iloc[-60] * 100
+                             if len(close) >= 60 else 0)
+                import ta as ta_lib
+                atr = ta_lib.volatility.AverageTrueRange(
+                    candles["high"], candles["low"], close, window=14
+                ).average_true_range().iloc[-1]
+                market_summary = (
+                    f"심볼: {symbol}\n"
+                    f"현재가: {price:.2f}\n"
+                    f"1시간 변동: {change_1h:+.2f}%\n"
+                    f"ATR(14): {atr:.2f} ({atr/price*100:.3f}%)\n"
+                )
+
+            report = await self._ai_agent.run(
+                candles_for_backtest=candles,
+                market_data_summary=market_summary,
+            )
+
+            # 보고서 로깅
+            report_text = self._ai_agent.format_report(report)
+            logger.info("agent.report", report=report_text)
+
+            # 전략이 교체되었으면 핫 스왑
+            if report.action_taken == "strategy_switched" and report.new_strategy_name:
+                new_strategy = get_strategy(report.new_strategy_name)
+                self.strategies[symbol] = new_strategy
+                logger.info("agent.hot_swap",
+                             symbol=symbol,
+                             old=report.current_strategy,
+                             new=report.new_strategy_name)
+
+                # 웹훅 알림
+                if db.get_setting("webhook_url"):
+                    await webhook.send_raw(
+                        f"🤖 AI Agent: 전략 교체\n"
+                        f"{report.current_strategy} → {report.new_strategy_name}\n"
+                        f"사유: {report.performance.reason}"
+                    )
+
+        except ImportError as e:
+            logger.warning("agent.llm_sdk_not_installed", error=str(e),
+                           msg="pip install anthropic/openai/google-genai")
+            self._ai_agent_enabled = False
+        except Exception:
+            logger.exception("agent.run_failed", symbol=symbol)
+
     async def _run_auto_optimize(self, symbol: str) -> None:
         """최근 데이터 기반 TP/SL 배수 자동 최적화."""
         try:
@@ -101,16 +177,24 @@ class FuturesEngine:
             if result:
                 strategy = self.strategies.get(symbol)
                 if strategy and hasattr(strategy, "SL_ATR_MULT"):
-                    strategy.SL_ATR_MULT = result["sl_mult"]
-                    strategy.TP_ATR_MULT = result["tp_mult"]
-                    strategy.TRAILING_ATR_MULT = result["trail_act_mult"]
-                    strategy.TRAILING_DIST_ATR = result["trail_dist_mult"]
-                    # 부분익절도 SL 기준으로 자동 설정
+                    # 최소 하한 적용 — 수수료+스프레드 커버 필수
+                    sl = max(result["sl_mult"], 1.0)
+                    tp = max(result["tp_mult"], 2.0)
+                    trail_act = max(result["trail_act_mult"], 2.0)
+                    trail_dist = max(result["trail_dist_mult"], 0.5)
+
+                    strategy.SL_ATR_MULT = sl
+                    strategy.TP_ATR_MULT = tp
+                    strategy.TRAILING_ATR_MULT = trail_act
+                    strategy.TRAILING_DIST_ATR = trail_dist
                     if hasattr(strategy, "PARTIAL_TP_ATR_MULT"):
-                        strategy.PARTIAL_TP_ATR_MULT = round(result["tp_mult"] * 0.4, 2)
+                        strategy.PARTIAL_TP_ATR_MULT = round(tp * 0.5, 2)
+                    # 심볼별 optimizer 점수 저장 (진입 차단 판단용)
+                    db.set_setting(f"opt_score_{symbol}", str(result["score"]))
                     logger.info("engine.auto_optimized", symbol=symbol,
-                                 sl=result["sl_mult"], tp=result["tp_mult"],
-                                 partial_tp=round(result["tp_mult"] * 0.4, 2))
+                                 sl=sl, tp=tp,
+                                 partial_tp=round(result["tp_mult"] * 0.4, 2),
+                                 score=result["score"])
         except Exception:
             logger.exception("engine.auto_optimize_failed", symbol=symbol)
 
@@ -199,6 +283,16 @@ class FuturesEngine:
             return
 
         if signal.type in (SignalType.BUY, SignalType.SELL) and not pos:
+            # optimizer 점수가 0이면 신규 진입 차단 (돈 태우는 심볼 보호)
+            opt_score = db.get_setting_float(f"opt_score_{symbol}")
+            if opt_score <= 0:
+                # DB에 심볼별 점수 없으면 글로벌 점수 확인
+                opt_score = db.get_setting_float("auto_opt_score")
+            if opt_score <= 0:
+                logger.info("engine.skip_entry", symbol=symbol,
+                             reason="optimizer_score_zero")
+                return
+
             direction = "LONG" if signal.type == SignalType.BUY else "SHORT"
             await self._open_position(symbol, direction, price)
             logger.info("engine.entry", symbol=symbol, direction=direction,
@@ -257,15 +351,20 @@ class FuturesEngine:
         # ── 부분 익절 (50%) ──
         if state and not state.partial_tp_taken and change >= partial_tp:
             half_qty = self._round_qty(symbol, qty * 0.5)
-            if half_qty > 0:
+            # 최소 주문 수량 체크 (너무 작으면 거래소 거부)
+            min_qty = self._min_qty(symbol)
+            if half_qty >= min_qty and (qty - half_qty) >= min_qty:
                 try:
                     if side == "LONG":
                         await self.client.close_long(symbol, half_qty)
                     else:
                         await self.client.close_short(symbol, half_qty)
                     state.partial_tp_taken = True
+                    remaining_qty = self._round_qty(symbol, qty - half_qty)
+                    db.update_position_quantity(symbol, remaining_qty)
                     logger.info("engine.partial_tp", symbol=symbol,
-                                 closed_qty=half_qty, change=f"{change:.3%}")
+                                 closed_qty=half_qty, remaining=remaining_qty,
+                                 change=f"{change:.3%}")
                     if db.get_setting("webhook_on_tp_sl") == "true":
                         await webhook.notify_partial_tp(symbol, price, half_qty, change)
                 except Exception:
@@ -303,15 +402,38 @@ class FuturesEngine:
             return (price - entry) / entry
         return (entry - price) / entry
 
+    def _dynamic_size_pct(self, balance: float) -> float:
+        """잔고 기반 동적 투자 비율 — 1심볼 집중 운영 최적화.
+
+        $150 미만: 25% (자본 보호하면서도 의미있는 포지션)
+        $150~$300: 30% (기본)
+        $300~$500: 35% (수익 확인 후 확대)
+        $500~$1000: 40% (본격 스케일업)
+        $1000+: 45% (최대)
+        """
+        if balance < 150:
+            return 0.25
+        elif balance < 300:
+            return 0.30
+        elif balance < 500:
+            return 0.35
+        elif balance < 1000:
+            return 0.40
+        else:
+            return 0.45
+
     async def _open_position(self, symbol: str, direction: str, price: float) -> None:
         balance = await self.client.get_balance()
-        size_pct = db.get_setting_float("position_size_pct")
+        size_pct = self._dynamic_size_pct(balance)
         leverage = db.get_setting_int("leverage")
-        invest = balance * size_pct
+
+        # 안전장치: 가용 잔고의 90%를 넘지 않도록 (증거금 여유)
+        max_invest = balance * 0.9
+        invest = min(balance * size_pct, max_invest)
         quantity = (invest * leverage) / price
         quantity = self._round_qty(symbol, quantity)
 
-        if quantity <= 0 or invest < 5:  # 최소 $5 이상
+        if quantity <= 0 or invest < 5:
             logger.warning("engine.insufficient_balance",
                            symbol=symbol, balance=balance, invest=invest)
             return
@@ -336,7 +458,8 @@ class FuturesEngine:
             quantity=quantity, strategy=db.get_setting("strategy"),
         )
         logger.info("engine.position_opened", symbol=symbol, direction=direction,
-                     qty=quantity, invest=f"${invest:.2f}")
+                     qty=quantity, invest=f"${invest:.2f}",
+                     balance=f"${balance:.2f}", size_pct=f"{size_pct:.0%}")
 
         if db.get_setting("webhook_on_open") == "true":
             await webhook.notify_open(symbol, direction, price, quantity, invest)
@@ -344,6 +467,8 @@ class FuturesEngine:
     async def _close_current(self, symbol: str, reason: str = "") -> float:
         pos = await self.client.get_position(symbol)
         if not pos:
+            # 거래소에 포지션 없으면 DB 고아 레코드 정리
+            db.delete_position(symbol)
             return 0.0
         entry_price = pos["entry_price"]
         side = pos["side"]
@@ -356,12 +481,18 @@ class FuturesEngine:
             logger.exception("engine.close_failed", symbol=symbol)
             return 0.0
         current_price = await self.client.get_price(symbol)
-        trade = db.close_position(symbol, exit_price=current_price)
+        fee = await self.client.get_recent_fees(symbol)
+        trade = db.close_position(symbol, exit_price=current_price, fee=fee)
         pnl = trade.pnl if trade else 0.0
+        net_pnl = trade.net_pnl if trade else 0.0
 
         if db.get_setting("webhook_on_close") == "true":
+            # 계좌 잔고 및 수익률 정보 포함
+            summary = await self.client.get_account_summary()
+            balance = summary["balance"]
             await webhook.notify_close(
-                symbol, side, entry_price, current_price, pnl, reason)
+                symbol, side, entry_price, current_price, pnl, reason,
+                balance=balance, fee=fee, net_pnl=net_pnl)
 
         return pnl
 
@@ -371,3 +502,11 @@ class FuturesEngine:
             "SOLUSDT": 1, "XRPUSDT": 0,
         }
         return round(quantity, precision.get(symbol, 3))
+
+    def _min_qty(self, symbol: str) -> float:
+        """심볼별 최소 주문 수량 (바이낸스 선물)."""
+        minimums = {
+            "BTCUSDT": 0.001, "ETHUSDT": 0.001, "BNBUSDT": 0.01,
+            "SOLUSDT": 0.1, "XRPUSDT": 1,
+        }
+        return minimums.get(symbol, 0.001)

@@ -10,6 +10,7 @@
 from dataclasses import dataclass, field
 from enum import Enum
 
+import numpy as np
 import pandas as pd
 import ta
 
@@ -85,7 +86,8 @@ def detect_market_state_htf(df: pd.DataFrame) -> MarketState:
 
     # BB 밴드폭
     bb = ta.volatility.BollingerBands(close, window=20)
-    bb_width = (bb.bollinger_hband() - bb.bollinger_lband()) / bb.bollinger_mavg()
+    bb_mavg = bb.bollinger_mavg()
+    bb_width = (bb.bollinger_hband() - bb.bollinger_lband()) / bb_mavg.replace(0, np.nan)
     bw_now = bb_width.iloc[-1]
     bw_avg = bb_width.rolling(20).mean().iloc[-1]
 

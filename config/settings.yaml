@@ -3,7 +3,7 @@
 
 exchange:
   name: binance
-  testnet: true  # Use testnet for development
+  testnet: false  # false = 실거래, true = 테스트넷
 
 trading:
   base_currency: USDT

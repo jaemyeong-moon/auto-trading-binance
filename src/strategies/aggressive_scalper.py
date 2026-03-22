@@ -33,7 +33,9 @@ class AggressiveState:
     position_side: str = "NONE"
     consecutive_losses: int = 0
     consecutive_wins: int = 0
+    cooldown_remaining: int = 0
     flip_mode: bool = False         # 연패 시 방향 반전
+    ticks_in_position: int = 0      # 포지션 보유 틱 수
     partial_tp_taken: bool = False
     highest_since_entry: float = 0.0
     lowest_since_entry: float = float("inf")
@@ -44,6 +46,7 @@ class AggressiveState:
 
     def open(self, side: str, price: float, atr: float) -> None:
         self.position_side = side
+        self.ticks_in_position = 0
         self.partial_tp_taken = False
         self.highest_since_entry = price
         self.lowest_since_entry = price
@@ -72,7 +75,7 @@ def detect_momentum_burst(df: pd.DataFrame, atr: float) -> tuple[str, float]:
     move = close[-1] - close[-4]
     move_atr = abs(move) / atr
 
-    if move_atr >= 0.8:  # 3봉 동안 0.8 ATR 이상 움직임
+    if move_atr >= 0.5:  # 3봉 동안 0.5 ATR 이상 움직임
         direction = "LONG" if move > 0 else "SHORT"
         return direction, move_atr
     return "NONE", move_atr
@@ -90,7 +93,7 @@ def detect_big_candle(df: pd.DataFrame) -> tuple[str, float]:
 
     body_ratio = body / wick
 
-    if body_ratio >= 0.7:
+    if body_ratio >= 0.5:
         direction = "LONG" if last["close"] > last["open"] else "SHORT"
         return direction, body_ratio
     return "NONE", body_ratio
@@ -100,7 +103,8 @@ def detect_squeeze(df: pd.DataFrame) -> bool:
     """볼린저 밴드 스퀴즈 감지 — 밴드폭이 좁아지면 곧 큰 움직임."""
     close = df["close"]
     bb = ta.volatility.BollingerBands(close, window=20)
-    width = (bb.bollinger_hband() - bb.bollinger_lband()) / bb.bollinger_mavg()
+    bb_mavg = bb.bollinger_mavg()
+    width = (bb.bollinger_hband() - bb.bollinger_lband()) / bb_mavg.replace(0, np.nan)
 
     if len(width.dropna()) < 20:
         return False
@@ -143,23 +147,31 @@ def compute_aggressive_score(
     else:
         details["micro_ema"] = False
 
-    # 2. 거래량 스파이크 — 2x 이상 (뭔가 일어나고 있음)
+    # 2. 거래량 스파이크 — 2x 이상, 또는 거래량 데이터 없으면 통과
     vol_avg = volume.rolling(20).mean().iloc[-1]
-    vol_ratio = volume.iloc[-1] / vol_avg if vol_avg > 0 else 0
-    if vol_ratio >= 2.0:
+    if vol_avg <= 0 or volume.iloc[-1] <= 0:
+        # 거래량 데이터 없음 (testnet 등) → 조건 스킵, 점수 부여
         score += 1
         details["vol_spike"] = True
-    elif vol_ratio >= 1.3:
-        # 1.3x도 0.5점 가치지만 정수로만 처리
-        pass
-    details["vol_spike"] = vol_ratio >= 2.0
-    details["vol_ratio"] = round(vol_ratio, 2)
+        details["vol_ratio"] = 0
+        details["vol_note"] = "no_data_pass"
+    else:
+        vol_ratio = volume.iloc[-1] / vol_avg
+        if vol_ratio >= 1.2:
+            score += 1
+            details["vol_spike"] = True
+        else:
+            details["vol_spike"] = False
+        details["vol_ratio"] = round(float(vol_ratio), 2)
 
-    # 3. 대형 캔들 확인
+    # 3. 대형 캔들 확인 — 몸통 비율 50% 이상으로 완화
     candle_dir, body_ratio = detect_big_candle(df)
     if candle_dir == direction:
         score += 1
         details["big_candle"] = True
+    elif float(body_ratio) >= 0.5 and candle_dir != "NONE":
+        # 방향은 다르지만 강한 캔들이면 0.5점... 정수라 패스
+        details["big_candle"] = False
     else:
         details["big_candle"] = False
     details["body_ratio"] = round(body_ratio, 2)
@@ -184,23 +196,22 @@ def compute_aggressive_score(
 
 @register
 class AggressiveMomentumRider(Strategy):
-    """v4 — 적극적 모멘텀 초단타.
+    """v4 — 적극적 모멘텀 라이더.
 
     원칙:
-    - 모멘텀 폭발 감지 → 즉시 진입
+    - 모멘텀 폭발 감지 → 진입
     - 횡보(스퀴즈) → 돌파 방향 진입
-    - 타이트 TP/SL: SL=0.5ATR, TP=0.75ATR
-    - 빠른 부분익절: 0.3ATR에서 50%
+    - TP/SL: 수수료 커버 + 2:1 RR 보장
+    - 트레일링으로 수익 극대화
     - 연패 2회 → 방향 반전 (flip mode)
-    - 쿨다운 없음 (즉시 재진입)
     """
 
-    SL_ATR_MULT = 0.5         # 타이트 손절
-    TP_ATR_MULT = 0.75        # 빠른 익절
-    PARTIAL_TP_ATR_MULT = 0.3  # 초빠른 부분익절
-    TRAILING_ATR_MULT = 0.0   # 트레일링 사용 안함 (빠르게 먹고 나감)
-    TRAILING_DIST_ATR = 0.0
-    SCORE_THRESHOLD = 2        # 4점 중 2점 (낮은 진입장벽)
+    SL_ATR_MULT = 2.0         # 여유있는 손절 (노이즈에 안 걸림)
+    TP_ATR_MULT = 4.0         # 수수료 커버 + 2:1 RR
+    PARTIAL_TP_ATR_MULT = 2.0  # 절반 수익에서 부분익절
+    TRAILING_ATR_MULT = 3.0   # 3 ATR 수익 시 트레일링 시작
+    TRAILING_DIST_ATR = 1.0   # 1 ATR 거리로 추적
+    SCORE_THRESHOLD = 2        # 4점 중 2점 (최소한의 확인)
 
     def __init__(self) -> None:
         self.state = AggressiveState()
@@ -226,15 +237,18 @@ class AggressiveMomentumRider(Strategy):
 
     def record_result(self, pnl: float) -> None:
         self.state.total_trades += 1
+        # 청산 후 쿨다운: 수익이면 5틱(2.5분), 손실이면 10틱(5분) 대기
         if pnl >= 0:
             self.state.wins += 1
             self.state.consecutive_wins += 1
             self.state.consecutive_losses = 0
             self.state.flip_mode = False
+            self.state.cooldown_remaining = 5
         else:
             self.state.losses += 1
             self.state.consecutive_losses += 1
             self.state.consecutive_wins = 0
+            self.state.cooldown_remaining = 10
             # 2연패 → 방향 반전 모드
             if self.state.consecutive_losses >= 2:
                 self.state.flip_mode = not self.state.flip_mode
@@ -245,6 +259,12 @@ class AggressiveMomentumRider(Strategy):
                  htf_candles: pd.DataFrame | None = None) -> Signal:
         if len(candles) < 30:
             return self._hold(symbol, reason="insufficient_data")
+
+        # ── 쿨다운 (청산 후 대기) ──
+        if self.state.cooldown_remaining > 0:
+            self.state.cooldown_remaining -= 1
+            return self._hold(symbol, reason="cooldown",
+                              remaining=self.state.cooldown_remaining)
 
         df = candles.copy()
         close = df["close"]
@@ -344,9 +364,16 @@ class AggressiveMomentumRider(Strategy):
         """전략 기반 추가 청산 판단. 기본 TP/SL은 엔진이 처리."""
         side = self.state.position_side
 
-        # 모멘텀 반전 감지 — 반대 방향 폭발이면 즉시 청산
+        # 진입 후 최소 보유: 10틱(30초×10=5분) 동안은 전략 청산 안함
+        # (엔진의 ATR 기반 SL/TP는 여전히 작동)
+        self.state.ticks_in_position += 1
+        if self.state.ticks_in_position < 10:
+            return self._hold(symbol, reason="min_hold", side=side,
+                              ticks=self.state.ticks_in_position)
+
+        # 모멘텀 반전 감지 — 강한 반전(2 ATR 이상)만 청산
         burst_dir, burst_str = detect_momentum_burst(df, atr)
-        if burst_str >= 1.0:
+        if burst_str >= 2.0:
             if (side == "LONG" and burst_dir == "SHORT") or \
                (side == "SHORT" and burst_dir == "LONG"):
                 return Signal(
