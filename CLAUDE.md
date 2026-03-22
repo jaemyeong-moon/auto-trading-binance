@@ -57,7 +57,16 @@ Settings load order (later overrides earlier):
 2. `config/settings.local.yaml` — local overrides (gitignored)
 3. `.env` — API keys and secrets (gitignored)
 
-Key env vars: `BINANCE_API_KEY`, `BINANCE_API_SECRET`, `BINANCE_TESTNET`, `DATABASE_URL`, `LOG_LEVEL`.
+Key env vars: `BINANCE_API_KEY`, `BINANCE_API_SECRET`, `BINANCE_TESTNET`, `DATABASE_URL`, `LOG_LEVEL`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`.
+
+## AI Strategy Agent
+
+- **`src/core/strategy_agent.py`** — 멀티 LLM 기반 자동 전략 생성/평가 에이전트. 주기적으로 트레이딩 성과를 분석하고, 성과 부진 시 신규 전략 코드를 LLM이 작성 → 구문 검증 → 보안 검증 → 백테스트 → 동적 로드 → 핫 스왑.
+- **`src/core/llm_provider.py`** — LLM 추상화 레이어. Anthropic(Claude), OpenAI(GPT), Google(Gemini) 지원. `.env`에 API 키를 넣으면 자동 감지.
+- **`src/strategies/ai_generated/`** — AI가 생성한 전략 파일 저장 디렉토리. 최대 5개 유지, 오래된 것부터 자동 정리.
+- 활성화: `.env`에 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` 중 하나 설정. `pip install -e ".[agent]"`.
+- AI Agent는 FuturesEngine의 메인 루프에서 약 1시간 주기로 실행됨 (`AI_AGENT_INTERVAL_TICKS`).
+- 생성된 전략은 `@register` 데코레이터로 레지스트리에 자동 등록, 엔진에서 핫 스왑.
 
 ## Conventions
 

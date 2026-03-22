@@ -11,6 +11,7 @@
 | v2 | [Adaptive Scalper](v2_adaptive_scalper.md) | 2026-03-19 | 운용 가능 | 시장 상태 판단 + 점수 진입 + 횡보 금지 + 부분익절/트레일링 |
 | v3 | [Smart Momentum Scalper](v3_smart_momentum_scalper.md) | 2026-03-19 | 운용 가능 | ATR 동적 TP/SL + 실행비용 차감 + RR 2:1 보장 + 과다매매 방지 |
 | v4 | [Aggressive Momentum Rider](v4_aggressive_momentum_rider.md) | 2026-03-19 | 운용 가능 | 모멘텀 폭발 즉시 진입 + 타이트 TP/SL + 횡보 매매 + 연패 방향반전 |
+| AI | [AI Strategy Agent](../ai_strategy_agent.md) | 2026-03-21 | 운용 가능 | Claude AI가 성과 분석 → 신규 전략 코드 자동 생성/검증/교체 |
 
 ## 문서 작성 규칙
 
