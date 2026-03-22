@@ -4,11 +4,11 @@ services:
     build: .
     container_name: auto-trader-bot
     command: python -m src.main
-    env_file: .env
+    env_file: .env.real
     volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./models:/app/models
+      - trading-data:/app/data
+      - trading-logs:/app/logs
+      - trading-models:/app/models
       - ./config:/app/config
     restart: unless-stopped
 
@@ -17,12 +17,17 @@ services:
     build: .
     container_name: auto-trader-dashboard
     command: streamlit run src/dashboard/app.py --server.headless true --server.port 8502 --server.address 0.0.0.0
-    env_file: .env
+    env_file: .env.real
     ports:
       - "8502:8502"
     volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./models:/app/models
+      - trading-data:/app/data
+      - trading-logs:/app/logs
+      - trading-models:/app/models
       - ./config:/app/config
     restart: unless-stopped
+
+volumes:
+  trading-data:
+  trading-logs:
+  trading-models:
