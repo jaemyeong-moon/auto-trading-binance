@@ -12,8 +12,20 @@ from src.core.config import settings
 
 # testnet / real 환경별 DB 분리 — 모드 전환 시 데이터 유실 방지
 _db_name = "trades_testnet.db" if settings.exchange.testnet else "trades_real.db"
-DB_PATH = Path(__file__).parent.parent.parent / "data" / _db_name
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# DATABASE_URL 환경변수에서 디렉토리 추출, 없으면 프로젝트 내 data/
+# 예: sqlite:////data/trades.db → /data/ 디렉토리 사용
+_default_url = "sqlite+aiosqlite:///data/trades.db"
+_env_url = settings.database_url
+
+if _env_url and _env_url != _default_url:
+    # sqlite:////data/trades.db → /data 추출
+    _db_dir = Path(_env_url.split("///")[-1]).parent if "///" in _env_url else Path("data")
+else:
+    _db_dir = Path(__file__).parent.parent.parent / "data"
+
+_db_dir.mkdir(parents=True, exist_ok=True)
+DB_PATH = _db_dir / _db_name
 DB_URL = f"sqlite:///{DB_PATH}"
 
 
