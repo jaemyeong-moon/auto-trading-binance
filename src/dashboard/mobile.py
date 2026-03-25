@@ -25,6 +25,7 @@ import uvicorn
 
 from src.core import database as db
 from src.exchange.futures_client import FuturesClient
+from src.strategies.registry import list_strategies
 
 db.init_db()
 
@@ -128,6 +129,9 @@ async def api_status(request: Request):
             "settings": {
                 "strategy": settings.get("strategy", ""),
                 "leverage": settings.get("leverage", "5"),
+                "position_size_pct": settings.get("position_size_pct", "0.1"),
+                "tp_pct": settings.get("tp_pct", "0.01"),
+                "sl_pct": settings.get("sl_pct", "0.005"),
                 "tick_interval": settings.get("tick_interval", "15"),
             },
         })
@@ -169,6 +173,13 @@ async def api_paper(request: Request):
                 "entry": p.entry_price, "sl": p.sl_price, "tp": p.tp_price,
             } for p in positions],
         })
+
+
+@app.get("/api/strategies")
+async def api_strategies(request: Request):
+    if err := _auth_guard(request): return err
+    strategies = list_strategies()
+    return JSONResponse(strategies)
 
 
 @app.post("/api/bot/{symbol}/start")
@@ -451,12 +462,22 @@ body {
 
 <div class="page" id="page-bots">
   <div class="card">
+    <div class="card-title">활성 전략</div>
+    <div id="activeStrategy" style="font-size:15px;font-weight:600;margin-bottom:8px;">-</div>
+    <div id="strategyDesc" style="font-size:12px;color:var(--dim);"></div>
+  </div>
+  <div class="card">
     <div class="card-title">봇 제어</div>
     <div class="bot-grid" id="botGrid"></div>
   </div>
   <div class="card">
     <div class="card-title">현재 설정</div>
     <div id="settingSummary"></div>
+  </div>
+  <div class="card">
+    <div class="card-title">가상매매 상태</div>
+    <div style="font-size:12px;color:var(--dim);margin-bottom:8px;">봇 실행 시 모든 전략이 $200 가상자본으로 자동 매매됩니다</div>
+    <div id="paperSummaryBots"><div class="loading"><div class="spinner"></div></div></div>
   </div>
 </div>
 
@@ -479,6 +500,14 @@ body {
 </div>
 
 <div class="page" id="page-settings">
+  <div class="card">
+    <div class="card-title">전략 선택</div>
+    <div class="setting-row">
+      <label>매매 전략</label>
+      <select id="sStrategy"></select>
+    </div>
+    <div id="strategyInfo" style="font-size:12px;color:var(--dim);padding:4px 0;"></div>
+  </div>
   <div class="card">
     <div class="card-title">거래 설정</div>
     <div class="setting-row">
@@ -507,6 +536,7 @@ body {
       <input type="number" id="sTick" min="5" max="120" step="5">
     </div>
     <button class="btn-primary" onclick="saveSettings()">설정 저장</button>
+    <div style="font-size:11px;color:var(--dim);margin-top:8px;text-align:center;">전략 변경 시 봇 재시작 필요</div>
   </div>
 </div>
 
@@ -539,6 +569,16 @@ async function authFetch(url, opts={}) {
 async function doLogout() {
   await fetch('/api/logout', {method:'POST'});
   location.href = '/';
+}
+
+// ─── Strategies cache ────────────────────────
+let strategiesCache = [];
+async function loadStrategies() {
+  try {
+    const r = await authFetch('/api/strategies');
+    if (!r) return;
+    strategiesCache = await r.json();
+  } catch(e) { console.error('loadStrategies:', e); }
 }
 
 // ─── Navigation ──────────────────────────────
@@ -625,15 +665,25 @@ function renderStatus(d) {
   // Bot grid
   renderBots(d.bots);
 
-  // Setting summary
+  // Setting summary + active strategy
   const s = d.settings;
+  const stratLabel = strategiesCache.find(x=>x.name===s.strategy);
+  const stratName = stratLabel ? stratLabel.label : s.strategy;
+  const stratDesc = stratLabel ? stratLabel.description : '';
+  document.getElementById('activeStrategy').textContent = stratName;
+  document.getElementById('strategyDesc').textContent = stratDesc;
   document.getElementById('settingSummary').innerHTML = `
     <div style="font-size:13px;line-height:2;">
-      전략: <b>${s.strategy}</b><br>
+      전략: <b>${stratName}</b><br>
       레버리지: <b>x${s.leverage}</b><br>
+      투자비율: <b>${(parseFloat(s.position_size_pct)*100).toFixed(0)}%</b><br>
+      익절/손절: <b>${(parseFloat(s.tp_pct)*100).toFixed(1)}% / ${(parseFloat(s.sl_pct)*100).toFixed(1)}%</b><br>
       분석주기: <b>${s.tick_interval}초</b>
     </div>
   `;
+
+  // Paper summary on bots page
+  loadPaperSummaryBots();
 }
 
 async function loadRecentTrades() {
@@ -743,10 +793,12 @@ async function loadPaper() {
     const pnlPct = (pnl / b.initial * 100);
     const wr = b.trades > 0 ? (b.wins/b.trades*100).toFixed(1) : '0';
     const pos = d.positions.filter(p=>p.strategy===b.strategy);
+    const label = strategiesCache.find(x=>x.name===b.strategy);
+    const name = label ? label.label : b.strategy;
     return `
       <div class="paper-row">
         <div class="paper-header">
-          <span class="paper-name">${b.strategy}</span>
+          <span class="paper-name">${name}</span>
           <span class="paper-bal ${cls(pnl)}">${fmt(b.balance)} <small>(${pnl>=0?'+':''}${pnlPct.toFixed(1)}%)</small></span>
         </div>
         <div class="paper-stats">
@@ -766,23 +818,73 @@ async function loadPaper() {
   }).join('');
 }
 
-// ─── Settings ────────────────────────────────
-async function loadSettingsForm() {
-  if (!statusCache) await loadStatus();
-  // Also load full settings from current DB
+// ─── Paper summary (bots page) ───────────────
+async function loadPaperSummaryBots() {
   try {
-    const r = await authFetch('/api/status');
+    const r = await authFetch('/api/paper');
     if (!r) return;
     const d = await r.json();
-    if (d.ok) {
-      const s = d.settings;
-      document.getElementById('sLeverage').value = s.leverage || '5';
+    const el = document.getElementById('paperSummaryBots');
+    if (!d.balances.length) {
+      el.innerHTML = '<div style="text-align:center;padding:12px;color:var(--dim)">봇 가동 시 자동 시작됩니다</div>';
+      return;
     }
-  } catch(e) {}
+    el.innerHTML = d.balances.map(b => {
+      const pnl = b.balance - b.initial;
+      const pnlPct = (pnl / b.initial * 100);
+      const wr = b.trades > 0 ? (b.wins/b.trades*100).toFixed(1) : '0';
+      const label = strategiesCache.find(x=>x.name===b.strategy);
+      const name = label ? label.label : b.strategy;
+      return `
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;${b !== d.balances[0] ? 'border-top:1px solid var(--border);' : ''}">
+          <div>
+            <div style="font-weight:600;font-size:13px;">${name}</div>
+            <div style="font-size:11px;color:var(--dim);">${b.trades}건 · 승률 ${wr}%</div>
+          </div>
+          <div style="text-align:right;">
+            <div class="${cls(pnl)}" style="font-weight:700;font-size:14px;">${fmt(b.balance)}</div>
+            <div class="${cls(pnl)}" style="font-size:11px;">${pnl>=0?'+':''}${pnlPct.toFixed(1)}%</div>
+          </div>
+        </div>
+      `;
+    }).join('');
+  } catch(e) { console.error('loadPaperSummaryBots:', e); }
+}
+
+// ─── Settings ────────────────────────────────
+async function loadSettingsForm() {
+  // Load strategies into dropdown
+  if (!strategiesCache.length) await loadStrategies();
+  const sel = document.getElementById('sStrategy');
+  if (sel.options.length <= 1) {
+    sel.innerHTML = strategiesCache.map(s =>
+      `<option value="${s.name}">${s.label}</option>`
+    ).join('');
+  }
+
+  // Fill form with current values
+  if (!statusCache) await loadStatus();
+  if (statusCache && statusCache.settings) {
+    const s = statusCache.settings;
+    sel.value = s.strategy;
+    document.getElementById('sLeverage').value = s.leverage || '5';
+    document.getElementById('sSizePct').value = (parseFloat(s.position_size_pct) * 100).toFixed(0);
+    document.getElementById('sTp').value = (parseFloat(s.tp_pct) * 100).toFixed(1);
+    document.getElementById('sSl').value = (parseFloat(s.sl_pct) * 100).toFixed(1);
+    document.getElementById('sTick').value = s.tick_interval;
+  }
+
+  // Strategy description on change
+  sel.onchange = () => {
+    const info = strategiesCache.find(x=>x.name===sel.value);
+    document.getElementById('strategyInfo').textContent = info ? info.description : '';
+  };
+  sel.onchange();
 }
 
 async function saveSettings() {
   const body = {
+    strategy: document.getElementById('sStrategy').value,
     leverage: document.getElementById('sLeverage').value,
     position_size_pct: String(Number(document.getElementById('sSizePct').value)/100),
     tp_pct: String(Number(document.getElementById('sTp').value)/100),
@@ -790,11 +892,12 @@ async function saveSettings() {
     tick_interval: document.getElementById('sTick').value,
   };
   await authFetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-  alert('설정 저장 완료');
+  alert('설정 저장 완료. 전략 변경 시 봇을 재시작하세요.');
+  loadStatus();
 }
 
 // ─── Auto refresh ────────────────────────────
-loadStatus();
+loadStrategies().then(() => loadStatus());
 setInterval(() => {
   const activePage = document.querySelector('.page.active');
   if (activePage.id === 'page-home' || activePage.id === 'page-bots') loadStatus();
