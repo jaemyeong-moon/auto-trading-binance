@@ -175,6 +175,81 @@ async def api_paper(request: Request):
         })
 
 
+@app.get("/api/candles/{symbol}")
+async def api_candles(request: Request, symbol: str, interval: str = "1m", limit: int = 200):
+    """캔들 데이터 + 해당 심볼 페이퍼 트레이드 마커."""
+    if err := _auth_guard(request): return err
+    try:
+        client = FuturesClient()
+        await client.connect()
+        try:
+            candles = await client.get_candles(symbol, interval=interval, limit=limit)
+        finally:
+            await client.disconnect()
+
+        if candles.empty:
+            return JSONResponse({"candles": [], "trades": []})
+
+        candle_data = [{
+            "time": int(row.name.timestamp()) if hasattr(row.name, 'timestamp') else int(idx),
+            "open": float(row["open"]), "high": float(row["high"]),
+            "low": float(row["low"]), "close": float(row["close"]),
+            "volume": float(row["volume"]),
+        } for idx, row in candles.iterrows()]
+
+        # 페이퍼 트레이드 마커 (최근 거래)
+        with db.get_session() as session:
+            paper_trades = session.query(db.PaperTrade).filter_by(
+                symbol=symbol
+            ).order_by(db.PaperTrade.closed_at.desc()).limit(50).all()
+
+            trade_markers = [{
+                "time": int(t.opened_at.timestamp()) if t.opened_at else 0,
+                "exit_time": int(t.closed_at.timestamp()) if t.closed_at else 0,
+                "side": t.side, "entry": t.entry_price, "exit": t.exit_price,
+                "sl": t.sl_price, "tp": t.tp_price,
+                "pnl": round(t.net_pnl or 0, 4), "reason": t.reason or "",
+                "strategy": t.strategy,
+            } for t in paper_trades]
+
+            # 열린 포지션도 마커로
+            open_positions = session.query(db.PaperPosition).filter_by(
+                symbol=symbol).all()
+            open_markers = [{
+                "time": int(p.opened_at.timestamp()) if p.opened_at else 0,
+                "side": p.side, "entry": p.entry_price,
+                "sl": p.sl_price, "tp": p.tp_price,
+                "strategy": p.strategy, "open": True,
+            } for p in open_positions]
+
+        return JSONResponse({
+            "candles": candle_data,
+            "trades": trade_markers,
+            "positions": open_markers,
+        })
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return JSONResponse({"candles": [], "trades": [], "error": str(e)})
+
+
+@app.get("/api/paper/trades")
+async def api_paper_trades(request: Request, strategy: str | None = None, limit: int = 50):
+    """페이퍼 트레이드 내역."""
+    if err := _auth_guard(request): return err
+    with db.get_session() as session:
+        q = session.query(db.PaperTrade).order_by(db.PaperTrade.closed_at.desc())
+        if strategy:
+            q = q.filter_by(strategy=strategy)
+        trades = q.limit(limit).all()
+        return JSONResponse([{
+            "id": t.id, "strategy": t.strategy, "symbol": t.symbol,
+            "side": t.side, "entry": t.entry_price, "exit": t.exit_price,
+            "pnl": round(t.net_pnl or 0, 4), "fee": round(t.fee or 0, 4),
+            "reason": t.reason or "", "sl": t.sl_price, "tp": t.tp_price,
+            "closed_at": t.closed_at.isoformat() if t.closed_at else "",
+        } for t in trades])
+
+
 @app.get("/api/strategies")
 async def api_strategies(request: Request):
     if err := _auth_guard(request): return err
@@ -291,6 +366,7 @@ MOBILE_HTML = """<!DOCTYPE html>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#0a0a0f">
 <title>Auto-Trader</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 :root {
   --bg: #0a0a0f; --card: #141420; --border: #1e1e30;
@@ -455,6 +531,19 @@ body {
     <div id="positionList"><div class="loading"><div class="spinner"></div></div></div>
   </div>
   <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <div class="card-title" style="margin:0;">차트</div>
+      <select id="chartSymbol" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px;">
+        <option value="BTCUSDT">BTC</option>
+        <option value="ETHUSDT">ETH</option>
+        <option value="BNBUSDT">BNB</option>
+        <option value="SOLUSDT">SOL</option>
+        <option value="XRPUSDT">XRP</option>
+      </select>
+    </div>
+    <div id="chartContainer" style="width:100%;height:300px;border-radius:8px;overflow:hidden;"></div>
+  </div>
+  <div class="card">
     <div class="card-title">최근 거래</div>
     <div id="recentTrades"><div class="loading"><div class="spinner"></div></div></div>
   </div>
@@ -496,6 +585,10 @@ body {
   <div class="card">
     <div class="card-title">가상매매 현황</div>
     <div id="paperList"><div class="loading"><div class="spinner"></div></div></div>
+  </div>
+  <div class="card">
+    <div class="card-title">가상매매 거래내역</div>
+    <div id="paperTradeList"><div class="loading"><div class="spinner"></div></div></div>
   </div>
 </div>
 
@@ -590,7 +683,7 @@ function showPage(name, btn) {
   // Load data for page
   if (name==='home') loadStatus();
   else if (name==='trades') loadTrades();
-  else if (name==='paper') loadPaper();
+  else if (name==='paper') { loadPaper(); loadPaperTrades(); }
   else if (name==='bots') loadStatus();
   else if (name==='settings') loadSettingsForm();
 }
@@ -684,6 +777,9 @@ function renderStatus(d) {
 
   // Paper summary on bots page
   loadPaperSummaryBots();
+
+  // Chart
+  loadChart();
 }
 
 async function loadRecentTrades() {
@@ -849,6 +945,138 @@ async function loadPaperSummaryBots() {
       `;
     }).join('');
   } catch(e) { console.error('loadPaperSummaryBots:', e); }
+}
+
+// ─── Chart ───────────────────────────────────
+let chart = null;
+let candleSeries = null;
+let volumeSeries = null;
+let markers = [];
+
+function initChart() {
+  const container = document.getElementById('chartContainer');
+  if (chart) { chart.remove(); }
+  chart = LightweightCharts.createChart(container, {
+    layout: { background: { color: '#141420' }, textColor: '#888' },
+    grid: { vertLines: { color: '#1e1e30' }, horzLines: { color: '#1e1e30' } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Magnet },
+    rightPriceScale: { borderColor: '#1e1e30' },
+    timeScale: { borderColor: '#1e1e30', timeVisible: true, secondsVisible: false },
+    width: container.clientWidth,
+    height: 300,
+  });
+  candleSeries = chart.addCandlestickSeries({
+    upColor: '#26a69a', downColor: '#ef5350',
+    borderUpColor: '#26a69a', borderDownColor: '#ef5350',
+    wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+  });
+  volumeSeries = chart.addHistogramSeries({
+    priceFormat: { type: 'volume' },
+    priceScaleId: '',
+    scaleMargins: { top: 0.85, bottom: 0 },
+  });
+  // Resize
+  new ResizeObserver(() => {
+    chart.applyOptions({ width: container.clientWidth });
+  }).observe(container);
+}
+
+async function loadChart() {
+  const sym = document.getElementById('chartSymbol').value;
+  try {
+    const r = await authFetch(`/api/candles/${sym}?limit=200`);
+    if (!r) return;
+    const d = await r.json();
+    if (!d.candles || !d.candles.length) return;
+
+    if (!chart) initChart();
+
+    candleSeries.setData(d.candles.map(c => ({
+      time: c.time, open: c.open, high: c.high, low: c.low, close: c.close,
+    })));
+    volumeSeries.setData(d.candles.map(c => ({
+      time: c.time, value: c.volume,
+      color: c.close >= c.open ? 'rgba(38,166,154,0.3)' : 'rgba(239,83,80,0.3)',
+    })));
+
+    // Buy/Sell 마커 (페이퍼 트레이드)
+    markers = [];
+    (d.trades || []).forEach(t => {
+      if (t.time) {
+        markers.push({
+          time: t.time,
+          position: t.side === 'LONG' ? 'belowBar' : 'aboveBar',
+          color: t.side === 'LONG' ? '#26a69a' : '#ef5350',
+          shape: t.side === 'LONG' ? 'arrowUp' : 'arrowDown',
+          text: `${t.strategy.substring(0,4)} ${t.side}`,
+        });
+      }
+      if (t.exit_time) {
+        markers.push({
+          time: t.exit_time,
+          position: 'inBar',
+          color: t.pnl >= 0 ? '#26a69a' : '#ef5350',
+          shape: 'circle',
+          text: `${t.reason} $${t.pnl.toFixed(2)}`,
+        });
+      }
+    });
+    // 열린 포지션 마커
+    (d.positions || []).forEach(p => {
+      if (p.time) {
+        markers.push({
+          time: p.time,
+          position: p.side === 'LONG' ? 'belowBar' : 'aboveBar',
+          color: '#ffa726',
+          shape: p.side === 'LONG' ? 'arrowUp' : 'arrowDown',
+          text: `OPEN ${p.side}`,
+        });
+      }
+    });
+    markers.sort((a,b) => a.time - b.time);
+    if (markers.length) candleSeries.setMarkers(markers);
+
+    chart.timeScale().fitContent();
+  } catch(e) { console.error('loadChart:', e); }
+}
+
+// 심볼 변경 시 차트 리로드
+document.getElementById('chartSymbol').addEventListener('change', loadChart);
+
+// ─── Paper Trades (거래내역) ─────────────────
+async function loadPaperTrades() {
+  try {
+    const r = await authFetch('/api/paper/trades?limit=30');
+    if (!r) return;
+    const trades = await r.json();
+    const el = document.getElementById('paperTradeList');
+
+    if (!trades.length) {
+      el.innerHTML = '<div style="text-align:center;padding:16px;color:var(--dim)">거래 없음</div>';
+      return;
+    }
+
+    el.innerHTML = trades.map(t => {
+      const label = strategiesCache.find(x=>x.name===t.strategy);
+      const sname = label ? label.label : t.strategy;
+      return `
+        <div class="trade-item">
+          <div class="trade-info">
+            <div class="trade-sym">
+              ${t.symbol.replace('USDT','')}
+              <span class="pos-side ${t.side==='LONG'?'long':'short'}" style="font-size:10px">${t.side}</span>
+              <span style="font-size:10px;color:var(--dim);margin-left:4px;">${t.reason}</span>
+            </div>
+            <div class="trade-meta">${sname} · ${fmt(t.entry)} → ${fmt(t.exit)}</div>
+            <div class="trade-meta">${t.closed_at ? new Date(t.closed_at).toLocaleString('ko',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : ''}</div>
+          </div>
+          <div>
+            <div class="trade-pnl ${cls(t.pnl)}">${fmt(t.pnl, 4)}</div>
+          </div>
+        </div>
+      `;
+    }).join('');
+  } catch(e) { console.error('loadPaperTrades:', e); }
 }
 
 // ─── Settings ────────────────────────────────
