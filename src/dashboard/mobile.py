@@ -67,6 +67,7 @@ async def api_status():
             },
         })
     except Exception as e:
+        import traceback; traceback.print_exc()
         return JSONResponse({"ok": False, "error": str(e)})
 
 
@@ -412,32 +413,35 @@ async function loadStatus() {
   try {
     const r = await fetch('/api/status');
     const d = await r.json();
-    if (!d.ok) throw new Error(d.error);
+    if (!d.ok) throw new Error(d.error || 'API 응답 오류');
     statusCache = d;
     renderStatus(d);
     document.getElementById('connDot').className = 'refresh-dot';
     document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('ko');
   } catch(e) {
     document.getElementById('connDot').className = 'refresh-dot off';
-    document.getElementById('lastUpdate').textContent = '연결 실패';
+    document.getElementById('lastUpdate').textContent = e.message || '연결 실패';
+    console.error('loadStatus error:', e);
   }
 }
 
 function renderStatus(d) {
-  const a = d.account;
+  const a = d.account || {};
   document.getElementById('mBalance').textContent = fmt(a.balance);
   document.getElementById('mAvailable').textContent = fmt(a.available);
 
   let totalMargin=0, totalUpnl=0;
   const posHtml = [];
-  for (const [sym, info] of Object.entries(d.positions)) {
+  for (const [sym, info] of Object.entries(d.positions || {})) {
     const pos = info.position;
     if (!pos) continue;
     totalMargin += pos.margin || 0;
     totalUpnl += pos.unrealized_pnl || 0;
-    const pnlPct = pos.side==='LONG'
-      ? ((pos.mark_price-pos.entry_price)/pos.entry_price*100)
-      : ((pos.entry_price-pos.mark_price)/pos.entry_price*100);
+    const entry = pos.entry_price || 0;
+    const mark = pos.mark_price || 0;
+    const pnlPct = entry > 0 ? (pos.side==='LONG'
+      ? ((mark-entry)/entry*100)
+      : ((entry-mark)/entry*100)) : 0;
     posHtml.push(`
       <div class="pos-card">
         <div>
@@ -478,6 +482,7 @@ function renderStatus(d) {
 }
 
 async function loadRecentTrades() {
+  try {
   const r = await fetch('/api/trades?limit=5');
   const trades = await r.json();
   if (!trades.length) {
@@ -497,6 +502,7 @@ async function loadRecentTrades() {
       </div>
     </div>
   `).join('');
+  } catch(e) { console.error('loadRecentTrades error:', e); }
 }
 
 // ─── Bots ────────────────────────────────────
