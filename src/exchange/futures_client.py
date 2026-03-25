@@ -54,9 +54,31 @@ class FuturesClient:
     async def get_candles(
         self, symbol: str, interval: str = "1m", limit: int = 200,
     ) -> pd.DataFrame:
-        raw = await self.client.futures_klines(
-            symbol=symbol, interval=interval, limit=limit,
-        )
+        MAX_PER_REQUEST = 1500
+
+        if limit <= MAX_PER_REQUEST:
+            raw = await self.client.futures_klines(
+                symbol=symbol, interval=interval, limit=limit,
+            )
+        else:
+            # 1500개 초과 시 여러 번 나눠서 조회
+            raw = []
+            remaining = limit
+            end_time = None
+            while remaining > 0:
+                batch = min(remaining, MAX_PER_REQUEST)
+                params = dict(symbol=symbol, interval=interval, limit=batch)
+                if end_time:
+                    params["endTime"] = end_time
+                batch_raw = await self.client.futures_klines(**params)
+                if not batch_raw:
+                    break
+                raw = batch_raw + raw  # 시간순 정렬
+                end_time = batch_raw[0][0] - 1  # 다음 배치는 이전 시점부터
+                remaining -= len(batch_raw)
+                if len(batch_raw) < batch:
+                    break
+
         if not raw:
             return pd.DataFrame()
         df = pd.DataFrame(raw, columns=[
@@ -68,6 +90,8 @@ class FuturesClient:
             df[col] = df[col].astype(float)
         df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
         df.set_index("open_time", inplace=True)
+        df = df[~df.index.duplicated(keep="last")]
+        df.sort_index(inplace=True)
         return df
 
     async def get_price(self, symbol: str) -> float:

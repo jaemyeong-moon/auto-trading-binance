@@ -27,6 +27,7 @@ class FuturesEngine:
         self.client = client
         self.strategies: dict[str, Strategy] = {}
         self._tasks: dict[str, asyncio.Task] = {}
+        self._paper_trader = None  # lazy init
         self._ai_agent = None  # lazy init
         self._ai_agent_enabled = bool(
             os.environ.get("ANTHROPIC_API_KEY")
@@ -38,12 +39,14 @@ class FuturesEngine:
         if symbol in self._tasks and not self._tasks[symbol].done():
             return
 
-        leverage = db.get_setting_int("leverage")
-        await self.client.set_leverage(symbol, leverage)
-
         strategy_name = db.get_setting("strategy")
         strategy = get_strategy(strategy_name)
         self.strategies[symbol] = strategy
+
+        # 전략이 자체 레버리지를 가지면 사용 (v6+)
+        from src.strategies import aggressive_scalper as _as
+        leverage = getattr(_as, "LEVERAGE", db.get_setting_int("leverage"))
+        await self.client.set_leverage(symbol, leverage)
 
         db.set_bot_running(symbol, True)
         task = asyncio.create_task(self._symbol_loop(symbol))
@@ -92,6 +95,10 @@ class FuturesEngine:
                     await self._tick_always_flip(symbol, strategy)
                 else:
                     await self._tick_signal_only(symbol, strategy)
+
+                # 페이퍼 트레이딩: 5틱마다 모든 전략 가상매매
+                if tick_count % 5 == 0:
+                    await self._run_paper_trading(symbol)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -103,6 +110,23 @@ class FuturesEngine:
                     logger.exception("engine.tick_error", symbol=symbol)
             tick_interval = db.get_setting_int("tick_interval")
             await asyncio.sleep(tick_interval)
+
+    async def _run_paper_trading(self, symbol: str) -> None:
+        """페이퍼 트레이딩: 모든 전략을 가상매매로 실행."""
+        try:
+            from src.core.paper_trader import PaperTrader
+            if self._paper_trader is None:
+                self._paper_trader = PaperTrader()
+
+            candles = await self.client.get_candles(symbol, interval="1m", limit=100)
+            htf = await self.client.get_candles(symbol, interval="15m", limit=50)
+            if candles.empty:
+                return
+
+            await self._paper_trader.tick(
+                {symbol: candles}, {symbol: htf})
+        except Exception:
+            logger.exception("paper.run_failed", symbol=symbol)
 
     async def _run_ai_agent(self, symbol: str) -> None:
         """AI Agent 실행: 성과 분석 → 필요 시 신규 전략 생성 → 핫 스왑."""
@@ -177,18 +201,18 @@ class FuturesEngine:
             if result:
                 strategy = self.strategies.get(symbol)
                 if strategy and hasattr(strategy, "SL_ATR_MULT"):
-                    # 최소 하한 적용 — 수수료+스프레드 커버 필수
-                    sl = max(result["sl_mult"], 1.0)
-                    tp = max(result["tp_mult"], 2.0)
-                    trail_act = max(result["trail_act_mult"], 2.0)
-                    trail_dist = max(result["trail_dist_mult"], 0.5)
+                    # 최소 하한 — 넓은 SL로 노이즈 생존, 넓은 TP로 수수료 커버
+                    sl = max(result["sl_mult"], 5.0)
+                    tp = max(result["tp_mult"], 8.0)
+                    trail_act = max(result["trail_act_mult"], 8.0)
+                    trail_dist = max(result["trail_dist_mult"], 2.0)
 
                     strategy.SL_ATR_MULT = sl
                     strategy.TP_ATR_MULT = tp
                     strategy.TRAILING_ATR_MULT = trail_act
                     strategy.TRAILING_DIST_ATR = trail_dist
                     if hasattr(strategy, "PARTIAL_TP_ATR_MULT"):
-                        strategy.PARTIAL_TP_ATR_MULT = round(tp * 0.5, 2)
+                        strategy.PARTIAL_TP_ATR_MULT = round(tp * 0.6, 2)
                     # 심볼별 optimizer 점수 저장 (진입 차단 판단용)
                     db.set_setting(f"opt_score_{symbol}", str(result["score"]))
                     logger.info("engine.auto_optimized", symbol=symbol,
@@ -203,9 +227,9 @@ class FuturesEngine:
     # ═══════════════════════════════════════════════════════
 
     async def _fetch_candles(self, symbol: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """1분봉 300개 + 15분봉 100개 동시 조회."""
-        candles_1m = await self.client.get_candles(symbol, interval="1m", limit=300)
-        htf_candles = await self.client.get_candles(symbol, interval="15m", limit=100)
+        """1분봉 3000개(50시간) + 15분봉 500개(5일) 조회."""
+        candles_1m = await self.client.get_candles(symbol, interval="1m", limit=3000)
+        htf_candles = await self.client.get_candles(symbol, interval="15m", limit=500)
         return candles_1m, htf_candles
 
     async def _tick_always_flip(self, symbol: str, strategy: Strategy) -> None:
@@ -282,6 +306,14 @@ class FuturesEngine:
             logger.info("engine.close_signal", symbol=symbol, reason=close_reason)
             return
 
+        # ── DCA 물타기: 포지션 있는데 같은 방향 신호 = 추가 매수 ──
+        if signal.type in (SignalType.BUY, SignalType.SELL) and pos:
+            entry_type = signal.metadata.get("entry_type", "")
+            if entry_type in ("dca1", "dca2"):
+                size_pct = signal.metadata.get("size_pct", 0.10)
+                await self._add_dca_position(symbol, signal, price, size_pct)
+                return
+
         if signal.type in (SignalType.BUY, SignalType.SELL) and not pos:
             # optimizer 점수가 0이면 신규 진입 차단 (돈 태우는 심볼 보호)
             opt_score = db.get_setting_float(f"opt_score_{symbol}")
@@ -291,6 +323,13 @@ class FuturesEngine:
             if opt_score <= 0:
                 logger.info("engine.skip_entry", symbol=symbol,
                              reason="optimizer_score_zero")
+                return
+
+            # 신호 confidence가 낮으면 진입 차단
+            if signal.confidence < 0.6:
+                logger.info("engine.skip_entry", symbol=symbol,
+                             reason="low_confidence",
+                             confidence=f"{signal.confidence:.2f}")
                 return
 
             direction = "LONG" if signal.type == SignalType.BUY else "SHORT"
@@ -402,6 +441,42 @@ class FuturesEngine:
             return (price - entry) / entry
         return (entry - price) / entry
 
+    async def _add_dca_position(self, symbol: str, signal, price: float,
+                                size_pct: float) -> None:
+        """DCA 물타기 — 기존 포지션에 추가 매수/매도."""
+        balance = await self.client.get_balance()
+        from src.strategies import aggressive_scalper as _as
+        leverage = getattr(_as, "LEVERAGE", 5)
+        invest = balance * size_pct
+        quantity = (invest * leverage) / price
+        quantity = self._round_qty(symbol, quantity)
+
+        if quantity <= 0 or invest < 5:
+            return
+
+        direction = signal.metadata.get("direction", "LONG")
+        try:
+            if direction == "LONG":
+                await self.client.open_long(symbol, quantity)
+            else:
+                await self.client.open_short(symbol, quantity)
+        except Exception:
+            logger.exception("engine.dca_failed", symbol=symbol)
+            return
+
+        # 전략 state 업데이트
+        strategy = self.strategies.get(symbol)
+        state = getattr(strategy, "state", None)
+        if state and hasattr(state, "add_dca"):
+            state.add_dca(price, quantity)
+
+        dca_level = signal.metadata.get("dca_level", 0)
+        avg_entry = state.avg_entry if state else price
+        logger.info("engine.dca", symbol=symbol, direction=direction,
+                     dca_level=dca_level, qty=quantity,
+                     avg_entry=f"${avg_entry:,.2f}",
+                     invest=f"${invest:.2f}")
+
     def _dynamic_size_pct(self, balance: float) -> float:
         """잔고 기반 동적 투자 비율 — 1심볼 집중 운영 최적화.
 
@@ -424,8 +499,19 @@ class FuturesEngine:
 
     async def _open_position(self, symbol: str, direction: str, price: float) -> None:
         balance = await self.client.get_balance()
-        size_pct = self._dynamic_size_pct(balance)
-        leverage = db.get_setting_int("leverage")
+
+        # 전략이 자체 포지션 설정을 가지면 사용
+        strategy = self.strategies.get(symbol)
+        from src.strategies import aggressive_scalper as _as
+        if hasattr(_as, "LEVERAGE"):
+            leverage = _as.LEVERAGE
+            # 적응형: 전략 state에서 동적 size_pct 읽기
+            state = getattr(strategy, "state", None)
+            params = getattr(state, "params", None)
+            size_pct = getattr(params, "grid_size_pct", 0.06) if params else 0.06
+        else:
+            size_pct = self._dynamic_size_pct(balance)
+            leverage = db.get_setting_int("leverage")
 
         # 안전장치: 가용 잔고의 90%를 넘지 않도록 (증거금 여유)
         max_invest = balance * 0.9

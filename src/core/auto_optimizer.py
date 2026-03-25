@@ -16,11 +16,11 @@ from src.core import database as db
 
 logger = structlog.get_logger()
 
-# 탐색 범위 (SL 최소 1.0 — 수수료+스프레드 감안)
-SL_RANGE = [1.0, 1.5, 2.0, 2.5, 3.0]                 # ATR 배수
-TP_RANGE = [2.0, 3.0, 4.0, 5.0, 6.0]                 # ATR 배수
-TRAIL_ACT_RANGE = [2.0, 3.0, 4.0]                     # ATR 배수
-TRAIL_DIST_RANGE = [0.5, 1.0, 1.5]                    # ATR 배수
+# 탐색 범위 (넓은 SL + 넓은 TP = 승률 우선)
+SL_RANGE = [5.0, 6.0, 8.0, 10.0]                      # ATR 배수
+TP_RANGE = [8.0, 10.0, 12.0, 15.0]                    # ATR 배수
+TRAIL_ACT_RANGE = [8.0, 10.0, 12.0]                   # ATR 배수
+TRAIL_DIST_RANGE = [2.0, 3.0, 4.0]                    # ATR 배수
 
 COMMISSION = 0.0004  # 왕복 수수료
 

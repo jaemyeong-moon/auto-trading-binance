@@ -51,6 +51,58 @@ class PositionRecord(Base):
     opened_at = Column(DateTime, default=now_kst)
 
 
+# ─── Paper Trading (가상매매) ─────────────────────────────
+
+class PaperBalance(Base):
+    """전략별 가상 잔고."""
+    __tablename__ = "paper_balances"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    strategy = Column(String, nullable=False, unique=True)
+    balance = Column(Float, default=200.0)
+    initial_balance = Column(Float, default=200.0)
+    total_trades = Column(Integer, default=0)
+    wins = Column(Integer, default=0)
+    losses = Column(Integer, default=0)
+
+
+class PaperPosition(Base):
+    """전략별 가상 포지션 (심볼당 1개)."""
+    __tablename__ = "paper_positions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    strategy = Column(String, nullable=False)
+    symbol = Column(String, nullable=False)
+    side = Column(String, nullable=False)
+    entry_price = Column(Float, nullable=False)
+    quantity = Column(Float, nullable=False)
+    entry_atr = Column(Float, nullable=True)
+    sl_price = Column(Float, nullable=True)
+    tp_price = Column(Float, nullable=True)
+    opened_at = Column(DateTime, default=now_kst)
+
+
+class PaperTrade(Base):
+    """전략별 가상 거래 기록."""
+    __tablename__ = "paper_trades"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    strategy = Column(String, nullable=False)
+    symbol = Column(String, nullable=False)
+    side = Column(String, nullable=False)
+    entry_price = Column(Float, nullable=False)
+    exit_price = Column(Float, nullable=True)
+    quantity = Column(Float, nullable=False)
+    pnl = Column(Float, nullable=True)
+    fee = Column(Float, nullable=True)
+    net_pnl = Column(Float, nullable=True)
+    sl_price = Column(Float, nullable=True)
+    tp_price = Column(Float, nullable=True)
+    reason = Column(String, nullable=True)
+    opened_at = Column(DateTime, default=now_kst)
+    closed_at = Column(DateTime, nullable=True)
+
+
 class BotState(Base):
     """Tracks which symbols have an active bot."""
     __tablename__ = "bot_state"
@@ -199,7 +251,7 @@ _DEFAULT_SETTINGS = {
     "leverage": "5",                 # 레버리지 배수
     "tp_pct": "0.01",               # 익절 % (1%)
     "sl_pct": "0.005",              # 손절 % (0.5%)
-    "tick_interval": "30",           # 분석 주기 (초)
+    "tick_interval": "15",           # 분석 주기 (초)
     # 자동 최적화 결과 (10분마다 갱신)
     "auto_sl_mult": "1.0",
     "auto_tp_mult": "2.0",

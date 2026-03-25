@@ -1,16 +1,16 @@
-"""v4. Aggressive Momentum Rider — 적극적 초단타 스캘핑.
+"""v9. 가이드 기반 전략 — "유리할 때만 베팅하고, 나머지는 쉬어라"
 
-v1~v3의 문제: 너무 보수적 → 거래 자체를 거의 안함
-v4 설계 원칙:
-- 모멘텀 폭발 감지 즉시 진입 (망설이면 늦음)
-- 타이트한 TP/SL로 빠르게 먹고 빠짐
-- 횡보장에서도 매매 (역추세 평균회귀)
-- 연패 시 방향 전환 (시장이 맞고 내가 틀림)
-- 거래 빈도 높음 → 소액 수익 누적
+구조:
+1. EMA50/200 추세 판단 → 한 방향만 거래
+2. EMA20 눌림목 진입
+3. ATR 변동성 필터 → 횡보 스킵
+4. 1:2 손익비 고정
+5. 1% 리스크 포지션 사이징
+6. 수수료+슬리피지 사전 차감
+7. 추세 없으면 쉬어라
 """
 
 from dataclasses import dataclass, field
-from enum import Enum
 
 import numpy as np
 import pandas as pd
@@ -21,40 +21,54 @@ from src.strategies.base import ExecutionMode, Strategy
 from src.strategies.registry import register
 
 
-class MicroRegime(str, Enum):
-    MOMENTUM_UP = "momentum_up"
-    MOMENTUM_DOWN = "momentum_down"
-    SQUEEZE = "squeeze"        # 횡보 압축 → 곧 터짐
-    CHOPPY = "choppy"          # 무질서
+LEVERAGE = 5
+RISK_PCT = 0.01           # 잔고의 1% 리스크
+RR_RATIO = 2.0            # 1:2 손익비
+TOTAL_COST_PCT = 0.001    # 수수료 0.08% + 슬리피지 0.02% = 0.1%
+SL_ATR_MULT = 2.0         # SL = 2 ATR
+MAX_DAILY_TRADES = 10
+COOLDOWN_WIN = 12          # 1분 (5초×12)
+COOLDOWN_LOSS = 60         # 5분
 
 
 @dataclass
-class AggressiveState:
+class V9State:
     position_side: str = "NONE"
-    consecutive_losses: int = 0
-    consecutive_wins: int = 0
-    cooldown_remaining: int = 0
-    flip_mode: bool = False         # 연패 시 방향 반전
-    ticks_in_position: int = 0      # 포지션 보유 틱 수
+    entry_price: float = 0.0
+    sl_price: float = 0.0
+    tp_price: float = 0.0
+    quantity: float = 0.0
+    risk_amt: float = 0.0
+
+    # 엔진 호환
+    entry_atr: float = 0.0
     partial_tp_taken: bool = False
     highest_since_entry: float = 0.0
     lowest_since_entry: float = float("inf")
-    entry_atr: float = 0.0
+
+    cooldown_remaining: int = 0
+    daily_trades: int = 0
+    last_trade_day: int = 0
     total_trades: int = 0
     wins: int = 0
     losses: int = 0
 
-    def open(self, side: str, price: float, atr: float) -> None:
+    def open(self, side: str, price: float, sl: float, tp: float,
+             qty: float, risk: float, atr: float) -> None:
         self.position_side = side
-        self.ticks_in_position = 0
-        self.partial_tp_taken = False
+        self.entry_price = price
+        self.sl_price = sl
+        self.tp_price = tp
+        self.quantity = qty
+        self.risk_amt = risk
+        self.entry_atr = atr
         self.highest_since_entry = price
         self.lowest_since_entry = price
-        self.entry_atr = atr
+        self.partial_tp_taken = False
 
     def close(self) -> None:
         self.position_side = "NONE"
-        self.partial_tp_taken = False
+        self.entry_price = 0.0
         self.entry_atr = 0.0
 
     def update_price(self, price: float) -> None:
@@ -62,159 +76,23 @@ class AggressiveState:
         self.lowest_since_entry = min(self.lowest_since_entry, price)
 
 
-# ─── 분석 함수 ────────────────────────────────────────────
-
-def detect_momentum_burst(df: pd.DataFrame, atr: float) -> tuple[str, float]:
-    """최근 3봉에서 모멘텀 폭발 감지.
-    Returns: (direction, strength) — direction이 NONE이면 폭발 없음."""
-    if len(df) < 5 or atr <= 0:
-        return "NONE", 0.0
-
-    close = df["close"].values
-    # 최근 3봉 가격 변화
-    move = close[-1] - close[-4]
-    move_atr = abs(move) / atr
-
-    if move_atr >= 0.5:  # 3봉 동안 0.5 ATR 이상 움직임
-        direction = "LONG" if move > 0 else "SHORT"
-        return direction, move_atr
-    return "NONE", move_atr
-
-
-def detect_big_candle(df: pd.DataFrame) -> tuple[str, float]:
-    """직전 캔들이 대형 캔들인지 감지.
-    몸통이 전체 범위의 70% 이상이면 강한 확신 캔들."""
-    last = df.iloc[-1]
-    body = abs(last["close"] - last["open"])
-    wick = last["high"] - last["low"]
-
-    if wick <= 0:
-        return "NONE", 0.0
-
-    body_ratio = body / wick
-
-    if body_ratio >= 0.5:
-        direction = "LONG" if last["close"] > last["open"] else "SHORT"
-        return direction, body_ratio
-    return "NONE", body_ratio
-
-
-def detect_squeeze(df: pd.DataFrame) -> bool:
-    """볼린저 밴드 스퀴즈 감지 — 밴드폭이 좁아지면 곧 큰 움직임."""
-    close = df["close"]
-    bb = ta.volatility.BollingerBands(close, window=20)
-    bb_mavg = bb.bollinger_mavg()
-    width = (bb.bollinger_hband() - bb.bollinger_lband()) / bb_mavg.replace(0, np.nan)
-
-    if len(width.dropna()) < 20:
-        return False
-
-    current_width = width.iloc[-1]
-    avg_width = width.rolling(50).mean().iloc[-1]
-
-    return current_width < avg_width * 0.6  # 평균 대비 60% 이하면 스퀴즈
-
-
-def compute_micro_regime(df: pd.DataFrame, atr: float) -> MicroRegime:
-    """초단기 시장 상태 판단."""
-    burst_dir, burst_str = detect_momentum_burst(df, atr)
-
-    if burst_dir != "NONE" and burst_str >= 1.0:
-        return MicroRegime.MOMENTUM_UP if burst_dir == "LONG" else MicroRegime.MOMENTUM_DOWN
-
-    if detect_squeeze(df):
-        return MicroRegime.SQUEEZE
-
-    return MicroRegime.CHOPPY
-
-
-def compute_aggressive_score(
-    df: pd.DataFrame, htf: pd.DataFrame | None,
-    direction: str, atr: float,
-) -> tuple[int, dict]:
-    """4개 지표, 2점 이상이면 진입. 빠르고 간결."""
-    close = df["close"]
-    volume = df["volume"]
-    score = 0
-    details = {}
-
-    # 1. 초고속 EMA 크로스 — EMA(3) vs EMA(5)
-    ema3 = close.ewm(span=3, adjust=False).mean().iloc[-1]
-    ema5 = close.ewm(span=5, adjust=False).mean().iloc[-1]
-    if (direction == "LONG" and ema3 > ema5) or (direction == "SHORT" and ema3 < ema5):
-        score += 1
-        details["micro_ema"] = True
-    else:
-        details["micro_ema"] = False
-
-    # 2. 거래량 스파이크 — 2x 이상, 또는 거래량 데이터 없으면 통과
-    vol_avg = volume.rolling(20).mean().iloc[-1]
-    if vol_avg <= 0 or volume.iloc[-1] <= 0:
-        # 거래량 데이터 없음 (testnet 등) → 조건 스킵, 점수 부여
-        score += 1
-        details["vol_spike"] = True
-        details["vol_ratio"] = 0
-        details["vol_note"] = "no_data_pass"
-    else:
-        vol_ratio = volume.iloc[-1] / vol_avg
-        if vol_ratio >= 1.2:
-            score += 1
-            details["vol_spike"] = True
-        else:
-            details["vol_spike"] = False
-        details["vol_ratio"] = round(float(vol_ratio), 2)
-
-    # 3. 대형 캔들 확인 — 몸통 비율 50% 이상으로 완화
-    candle_dir, body_ratio = detect_big_candle(df)
-    if candle_dir == direction:
-        score += 1
-        details["big_candle"] = True
-    elif float(body_ratio) >= 0.5 and candle_dir != "NONE":
-        # 방향은 다르지만 강한 캔들이면 0.5점... 정수라 패스
-        details["big_candle"] = False
-    else:
-        details["big_candle"] = False
-    details["body_ratio"] = round(body_ratio, 2)
-
-    # 4. 15분봉 방향 일치 (있으면 보너스)
-    if htf is not None and len(htf) > 20:
-        htf_ema3 = htf["close"].ewm(span=3, adjust=False).mean().iloc[-1]
-        htf_ema8 = htf["close"].ewm(span=8, adjust=False).mean().iloc[-1]
-        if (direction == "LONG" and htf_ema3 > htf_ema8) or \
-           (direction == "SHORT" and htf_ema3 < htf_ema8):
-            score += 1
-            details["htf_agree"] = True
-        else:
-            details["htf_agree"] = False
-    else:
-        details["htf_agree"] = False
-
-    return score, details
-
-
-# ─── 전략 클래스 ───────────────────────────────────────────
-
 @register
 class AggressiveMomentumRider(Strategy):
-    """v4 — 적극적 모멘텀 라이더.
+    """v9 — 유리할 때만 베팅.
 
-    원칙:
-    - 모멘텀 폭발 감지 → 진입
-    - 횡보(스퀴즈) → 돌파 방향 진입
-    - TP/SL: 수수료 커버 + 2:1 RR 보장
-    - 트레일링으로 수익 극대화
-    - 연패 2회 → 방향 반전 (flip mode)
+    EMA50/200 추세 → EMA20 눌림목 → RSI 확인 → 1:2 RR → 1% 리스크.
+    추세 없으면 쉰다. 수수료 사전 차감.
     """
 
-    SL_ATR_MULT = 2.0         # 여유있는 손절 (노이즈에 안 걸림)
-    TP_ATR_MULT = 4.0         # 수수료 커버 + 2:1 RR
-    PARTIAL_TP_ATR_MULT = 2.0  # 절반 수익에서 부분익절
-    TRAILING_ATR_MULT = 3.0   # 3 ATR 수익 시 트레일링 시작
-    TRAILING_DIST_ATR = 1.0   # 1 ATR 거리로 추적
-    SCORE_THRESHOLD = 2        # 4점 중 2점 (최소한의 확인)
+    # 엔진 ATR SL/TP 비활성화 (자체 관리)
+    SL_ATR_MULT = 99.0
+    TP_ATR_MULT = 99.0
+    PARTIAL_TP_ATR_MULT = 99.0
+    TRAILING_ATR_MULT = 99.0
+    TRAILING_DIST_ATR = 99.0
 
     def __init__(self) -> None:
-        self.state = AggressiveState()
+        self.state = V9State()
 
     @property
     def name(self) -> str:
@@ -222,14 +100,11 @@ class AggressiveMomentumRider(Strategy):
 
     @property
     def label(self) -> str:
-        return "v4. Aggressive Momentum Rider"
+        return "v9. Trend Pullback"
 
     @property
     def description(self) -> str:
-        return (
-            "적극적 초단타. 모멘텀 폭발 즉시 진입, 타이트 TP/SL(0.5/0.75 ATR). "
-            "횡보에서도 스퀴즈 돌파 매매. 쿨다운 없음, 연패 시 방향 반전."
-        )
+        return "EMA50/200 추세 + EMA20 눌림목 진입. 1:2 RR, 1% 리스크. 추세 없으면 쉰다."
 
     @property
     def mode(self) -> ExecutionMode:
@@ -237,152 +112,226 @@ class AggressiveMomentumRider(Strategy):
 
     def record_result(self, pnl: float) -> None:
         self.state.total_trades += 1
-        # 청산 후 쿨다운: 수익이면 5틱(2.5분), 손실이면 10틱(5분) 대기
+        self.state.daily_trades += 1
         if pnl >= 0:
             self.state.wins += 1
-            self.state.consecutive_wins += 1
-            self.state.consecutive_losses = 0
-            self.state.flip_mode = False
-            self.state.cooldown_remaining = 5
+            self.state.cooldown_remaining = COOLDOWN_WIN
         else:
             self.state.losses += 1
-            self.state.consecutive_losses += 1
-            self.state.consecutive_wins = 0
-            self.state.cooldown_remaining = 10
-            # 2연패 → 방향 반전 모드
-            if self.state.consecutive_losses >= 2:
-                self.state.flip_mode = not self.state.flip_mode
-                self.state.consecutive_losses = 0
+            self.state.cooldown_remaining = COOLDOWN_LOSS
         self.state.close()
 
     def evaluate(self, symbol: str, candles: pd.DataFrame,
                  htf_candles: pd.DataFrame | None = None) -> Signal:
-        if len(candles) < 30:
-            return self._hold(symbol, reason="insufficient_data")
+        # 15분봉이 핵심 — 없으면 판단 불가
+        if htf_candles is None or len(htf_candles) < 210:
+            return self._hold(symbol, reason="insufficient_htf")
 
-        # ── 쿨다운 (청산 후 대기) ──
+        from datetime import datetime
+        today = datetime.now().day
+        if self.state.last_trade_day != today:
+            self.state.daily_trades = 0
+            self.state.last_trade_day = today
+
         if self.state.cooldown_remaining > 0:
             self.state.cooldown_remaining -= 1
-            return self._hold(symbol, reason="cooldown",
-                              remaining=self.state.cooldown_remaining)
+            return self._hold(symbol, reason="cooldown")
 
-        df = candles.copy()
-        close = df["close"]
-        price = close.iloc[-1]
+        if self.state.daily_trades >= MAX_DAILY_TRADES:
+            return self._hold(symbol, reason="daily_limit")
 
-        # ATR
-        atr = ta.volatility.AverageTrueRange(
-            df["high"], df["low"], close, window=14
-        ).average_true_range().iloc[-1]
+        # 1분봉 현재가
+        price = float(candles.iloc[-1]["close"])
+
+        # ── 포지션 보유 중: SL/TP 체크 ──
+        if self.state.position_side != "NONE":
+            self.state.update_price(price)
+            return self._manage_position(symbol, price, candles)
+
+        # ══ 15분봉 분석 ══
+        close_15 = htf_candles["close"].astype(float)
+        high_15 = htf_candles["high"].astype(float)
+        low_15 = htf_candles["low"].astype(float)
+
+        ema50 = close_15.ewm(span=50, adjust=False).mean()
+        ema200 = close_15.ewm(span=200, adjust=False).mean()
+        ema20 = close_15.ewm(span=20, adjust=False).mean()
+        atr_15 = ta.volatility.AverageTrueRange(
+            high_15, low_15, close_15, window=14
+        ).average_true_range()
+        rsi_15 = ta.momentum.RSIIndicator(close_15, window=14).rsi()
+
+        e50 = float(ema50.iloc[-1])
+        e200 = float(ema200.iloc[-1])
+        e20 = float(ema20.iloc[-1])
+        atr = float(atr_15.iloc[-1])
+        rsi = float(rsi_15.iloc[-1])
+        htf_price = float(close_15.iloc[-1])
+        htf_low = float(low_15.iloc[-1])
+        htf_high = float(high_15.iloc[-1])
 
         if atr <= 0 or np.isnan(atr):
             return self._hold(symbol, reason="zero_atr")
 
-        # ── 포지션 보유 중: 청산은 엔진이 ATR 기반으로 처리 ──
-        if self.state.position_side != "NONE":
-            self.state.update_price(price)
-            return self._evaluate_exit(symbol, df, price, atr, htf_candles)
+        # ── 1. 추세 판단 ──
+        if e50 > e200:
+            bias = "LONG"
+        elif e50 < e200:
+            bias = "SHORT"
+        else:
+            return self._hold(symbol, reason="no_trend",
+                              ema50=round(e50, 2), ema200=round(e200, 2))
 
-        # ── 시장 상태 ──
-        regime = compute_micro_regime(df, atr)
+        # ── 2. 변동성 필터 ──
+        atr_pct = atr / htf_price
+        if atr_pct < TOTAL_COST_PCT * 3:
+            return self._hold(symbol, reason="low_volatility",
+                              atr_pct=round(atr_pct * 100, 4))
 
-        # ── 방향 결정 ──
-        direction = self._determine_direction(df, atr, regime)
-        if direction == "NONE":
-            return self._hold(symbol, reason="no_direction", regime=regime.value)
+        # ── 3. 눌림목 감지 ──
+        if bias == "LONG":
+            pullback = htf_low <= e20 * 1.002 and htf_price > e20
+            rsi_ok = 35 < rsi < 60
+        else:
+            pullback = htf_high >= e20 * 0.998 and htf_price < e20
+            rsi_ok = 40 < rsi < 65
 
-        # ── 연패 반전 모드 ──
-        if self.state.flip_mode:
-            direction = "SHORT" if direction == "LONG" else "LONG"
+        if not pullback:
+            return self._hold(symbol, reason="no_pullback",
+                              bias=bias, price_vs_ema20=round((htf_price/e20-1)*100, 3))
 
-        # ── 점수 체크 ──
-        score, details = compute_aggressive_score(df, htf_candles, direction, atr)
+        if not rsi_ok:
+            return self._hold(symbol, reason="rsi_filter",
+                              bias=bias, rsi=round(rsi, 1))
 
-        if score < self.SCORE_THRESHOLD:
-            return self._hold(symbol, reason="low_score",
-                              score=score, details=details, regime=regime.value)
+        # ── 4. 1분봉 모멘텀 확인 (정밀 타이밍) ──
+        if len(candles) > 10:
+            ema5_1m = candles["close"].ewm(span=5, adjust=False).mean().iloc[-1]
+            ema13_1m = candles["close"].ewm(span=13, adjust=False).mean().iloc[-1]
+            if bias == "LONG" and ema5_1m < ema13_1m:
+                return self._hold(symbol, reason="1m_not_ready", bias=bias)
+            if bias == "SHORT" and ema5_1m > ema13_1m:
+                return self._hold(symbol, reason="1m_not_ready", bias=bias)
 
-        # ── 진입 ──
-        self.state.open(direction, price, atr)
-        signal_type = SignalType.BUY if direction == "LONG" else SignalType.SELL
-        confidence = score / 4.0
+        # ── 5. 수수료 커버 체크 ──
+        sl_dist = atr * SL_ATR_MULT
+        tp_dist = sl_dist * RR_RATIO
+        expected_profit_pct = tp_dist / price
+        if expected_profit_pct < TOTAL_COST_PCT:
+            return self._hold(symbol, reason="fee_not_covered")
+
+        # ── 6. 포지션 사이징 (1% 리스크) ──
+        # 잔고는 엔진이 넘겨줌 — 여기서는 signal만 생성
+        if bias == "LONG":
+            sl = price - sl_dist
+            tp = price + tp_dist
+        else:
+            sl = price + sl_dist
+            tp = price - tp_dist
+
+        self.state.open(bias, price, sl, tp, 0, 0, atr)
 
         return Signal(
-            symbol=symbol, type=signal_type, confidence=confidence,
+            symbol=symbol,
+            type=SignalType.BUY if bias == "LONG" else SignalType.SELL,
+            confidence=0.8,
             source=self.name,
             metadata={
-                "direction": direction,
-                "regime": regime.value,
-                "score": score,
-                "details": details,
+                "direction": bias,
+                "entry_type": "pullback",
+                "sl": round(sl, 2),
+                "tp": round(tp, 2),
                 "atr": round(atr, 2),
-                "flip_mode": self.state.flip_mode,
-                "consecutive_losses": self.state.consecutive_losses,
-                "consecutive_wins": self.state.consecutive_wins,
-                "sl_atr_mult": self.SL_ATR_MULT,
-                "tp_atr_mult": self.TP_ATR_MULT,
-                "partial_tp_atr_mult": self.PARTIAL_TP_ATR_MULT,
+                "rsi": round(rsi, 1),
+                "ema50": round(e50, 2),
+                "ema200": round(e200, 2),
+                "rr": RR_RATIO,
             },
         )
 
-    def _determine_direction(self, df: pd.DataFrame, atr: float,
-                             regime: MicroRegime) -> str:
-        """시장 상태별 방향 결정."""
-        close = df["close"]
-
-        if regime in (MicroRegime.MOMENTUM_UP, MicroRegime.MOMENTUM_DOWN):
-            # 모멘텀 방향 그대로
-            burst_dir, _ = detect_momentum_burst(df, atr)
-            return burst_dir
-
-        if regime == MicroRegime.SQUEEZE:
-            # 스퀴즈: 직전 캔들 방향으로 (돌파 기대)
-            candle_dir, _ = detect_big_candle(df)
-            if candle_dir != "NONE":
-                return candle_dir
-            # 대형 캔들 없으면 EMA 방향
-            ema3 = close.ewm(span=3, adjust=False).mean().iloc[-1]
-            ema5 = close.ewm(span=5, adjust=False).mean().iloc[-1]
-            return "LONG" if ema3 > ema5 else "SHORT"
-
-        if regime == MicroRegime.CHOPPY:
-            # 무질서: RSI 극단에서 역추세 (평균회귀)
-            rsi = ta.momentum.RSIIndicator(close, window=7).rsi().iloc[-1]
-            if rsi < 25:
-                return "LONG"
-            elif rsi > 75:
-                return "SHORT"
-            # RSI 중립이면 모멘텀 방향
-            ema3 = close.ewm(span=3, adjust=False).mean().iloc[-1]
-            ema5 = close.ewm(span=5, adjust=False).mean().iloc[-1]
-            return "LONG" if ema3 > ema5 else "SHORT"
-
-        return "NONE"
-
-    def _evaluate_exit(self, symbol: str, df: pd.DataFrame, price: float,
-                       atr: float, htf: pd.DataFrame | None) -> Signal:
-        """전략 기반 추가 청산 판단. 기본 TP/SL은 엔진이 처리."""
+    def _manage_position(self, symbol: str, price: float,
+                         candles: pd.DataFrame) -> Signal:
+        """SL/TP + 모멘텀 기반 판단."""
         side = self.state.position_side
+        entry = self.state.entry_price
+        sl = self.state.sl_price
+        tp = self.state.tp_price
 
-        # 진입 후 최소 보유: 10틱(30초×10=5분) 동안은 전략 청산 안함
-        # (엔진의 ATR 기반 SL/TP는 여전히 작동)
-        self.state.ticks_in_position += 1
-        if self.state.ticks_in_position < 10:
-            return self._hold(symbol, reason="min_hold", side=side,
-                              ticks=self.state.ticks_in_position)
+        # SL 도달
+        if (side == "LONG" and price <= sl) or \
+           (side == "SHORT" and price >= sl):
+            return Signal(
+                symbol=symbol, type=SignalType.CLOSE, confidence=0.95,
+                source=self.name,
+                metadata={"reason": "stop_loss", "entry": round(entry, 2)},
+            )
 
-        # 모멘텀 반전 감지 — 강한 반전(2 ATR 이상)만 청산
-        burst_dir, burst_str = detect_momentum_burst(df, atr)
-        if burst_str >= 2.0:
-            if (side == "LONG" and burst_dir == "SHORT") or \
-               (side == "SHORT" and burst_dir == "LONG"):
+        # TP 도달 → 모멘텀 분석
+        if (side == "LONG" and price >= tp) or \
+           (side == "SHORT" and price <= tp):
+
+            # 모멘텀 지속 여부 확인
+            momentum = self._check_momentum(side, candles)
+            if momentum > 0:
+                # 모멘텀 지속 → TP 연장
+                atr = self.state.entry_atr
+                if side == "LONG":
+                    self.state.tp_price = tp + atr
+                else:
+                    self.state.tp_price = tp - atr
+                return self._hold(symbol, reason="tp_extended",
+                                  new_tp=round(self.state.tp_price, 2))
+            else:
+                # 모멘텀 약화 → 익절
                 return Signal(
                     symbol=symbol, type=SignalType.CLOSE, confidence=0.9,
                     source=self.name,
-                    metadata={"reason": "momentum_reversal", "burst_strength": round(burst_str, 2)},
+                    metadata={
+                        "reason": "take_profit",
+                        "entry": round(entry, 2),
+                        "momentum": round(momentum, 3),
+                    },
                 )
 
-        return self._hold(symbol, reason="hold", side=side)
+        # 수익 중 + 모멘텀 반전 → 조기 익절 (수수료 넘는 수익만)
+        if side == "LONG":
+            change = (price - entry) / entry
+        else:
+            change = (entry - price) / entry
+
+        if change > TOTAL_COST_PCT:
+            momentum = self._check_momentum(side, candles)
+            if momentum < -0.3:
+                return Signal(
+                    symbol=symbol, type=SignalType.CLOSE, confidence=0.85,
+                    source=self.name,
+                    metadata={
+                        "reason": "early_tp",
+                        "net_pct": round((change - TOTAL_COST_PCT) * 100, 3),
+                    },
+                )
+
+        return self._hold(symbol, reason="hold",
+                          change_pct=round(change * 100, 3))
+
+    def _check_momentum(self, side: str, candles: pd.DataFrame) -> float:
+        """최근 캔들의 모멘텀. 양수=방향 지속, 음수=반전."""
+        if len(candles) < 10:
+            return 0.0
+
+        close = candles["close"].values[-10:].astype(float)
+        recent = float(np.mean(close[-3:]))
+        prev = float(np.mean(close[-6:-3]))
+
+        if prev <= 0:
+            return 0.0
+
+        change = (recent - prev) / prev * 100
+
+        if side == "LONG":
+            return change
+        else:
+            return -change
 
     def _hold(self, symbol: str, reason: str = "", **kwargs) -> Signal:
         return Signal(symbol=symbol, type=SignalType.HOLD, confidence=0.0,

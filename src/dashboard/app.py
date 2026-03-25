@@ -14,6 +14,7 @@ from plotly.subplots import make_subplots
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.core import database as db
+from src.core.models import SignalType
 from src.exchange.futures_client import FuturesClient
 from src.core.futures_engine import FuturesEngine
 from src.strategies.scalper import MomentumFlipScalper
@@ -137,10 +138,10 @@ def load_trades_df(symbol: str | None = None) -> pd.DataFrame:
     return pd.DataFrame([{
         "ID": t.id, "심볼": t.symbol, "방향": t.side,
         "진입가": t.entry_price, "청산가": t.exit_price, "수량": t.quantity,
-        "손익(USDT)": round(t.pnl, 2) if t.pnl else 0,
-        "수수료": round(t.fee, 4) if t.fee else 0,
-        "순손익": round(t.net_pnl, 2) if t.net_pnl else 0,
-        "손익(%)": round(t.pnl_pct, 2) if t.pnl_pct else 0,
+        "손익(USDT)": round(t.pnl, 2) if t.pnl is not None else 0,
+        "수수료": round(t.fee, 4) if t.fee is not None else 0,
+        "순손익": round(t.net_pnl if t.net_pnl is not None else (t.pnl or 0), 2),
+        "손익(%)": round(t.pnl_pct, 2) if t.pnl_pct is not None else 0,
         "전략": t.strategy, "청산시간": t.closed_at,
     } for t in trades])
 
@@ -157,7 +158,7 @@ st.sidebar.caption(
     f"1분봉"
 )
 st.sidebar.divider()
-page = st.sidebar.radio("페이지", ["실시간 현황", "백테스팅", "거래 내역", "설정"])
+page = st.sidebar.radio("페이지", ["실시간 현황", "시뮬레이션", "백테스팅", "거래 내역", "설정"])
 auto_refresh = st.sidebar.checkbox("자동 새로고침 (10초)", value=False)
 
 # 사이드바 하단에 현재 설정 요약
@@ -285,14 +286,40 @@ if page == "실시간 현황":
         with col_mid:
             if pos:
                 st.markdown("**투자 현황**")
+                # ATR 기반 SL/TP 가격 계산
+                _atr_val = None
+                if not candles.empty and len(candles) > 14:
+                    import ta as _ta
+                    _atr_val = _ta.volatility.AverageTrueRange(
+                        candles["high"], candles["low"], candles["close"], window=14
+                    ).average_true_range().iloc[-1]
+
+                sl_mult = float(current_settings.get("auto_sl_mult", "8.0"))
+                tp_mult = float(current_settings.get("auto_tp_mult", "12.0"))
+
+                sl_price_str = "—"
+                tp_price_str = "—"
+                if _atr_val and _atr_val > 0:
+                    if side == "LONG":
+                        sl_price = entry - _atr_val * sl_mult
+                        tp_price = entry + _atr_val * tp_mult
+                    else:
+                        sl_price = entry + _atr_val * sl_mult
+                        tp_price = entry - _atr_val * tp_mult
+                    sl_price_str = f"${sl_price:,.2f}"
+                    tp_price_str = f"${tp_price:,.2f}"
+
+                lev = int(float(current_settings['leverage']))
                 st.markdown(f"""
 | 항목 | 값 |
 |------|------|
-| 진입가 | `${pos['entry_price']:,.2f}` |
+| 진입가 | `${entry:,.2f}` |
 | 현재가(Mark) | `${pos['mark_price']:,.2f}` |
-| 증거금 (내돈) | `${pos['margin']:,.2f}` |
+| 🟢 익절가 | `{tp_price_str}` ({tp_mult:.0f}x ATR) |
+| 🔴 손절가 | `{sl_price_str}` ({sl_mult:.0f}x ATR) |
+| 증거금 | `${pos['margin']:,.2f}` |
 | 포지션 규모 | `${pos['notional']:,.2f}` |
-| 레버리지 효과 | x{int(float(current_settings['leverage']))} → 수익률 `{pnl_pct*int(float(current_settings['leverage'])):+.1f}%` |
+| 레버리지 효과 | x{lev} → 수익률 `{pnl_pct*lev:+.1f}%` |
 """)
             else:
                 st.markdown("**투자 현황**")
@@ -342,11 +369,18 @@ if page == "실시간 현황":
             fig.add_trace(go.Scatter(x=candles.index, y=candles["ema20"],
                 name="EMA(20)", line=dict(color="#9c27b0", width=1, dash="dash")), row=1, col=1)
 
-            # 진입가 라인
+            # 진입가 / SL / TP 라인
             if pos:
                 fig.add_hline(y=pos["entry_price"], line_dash="dot",
                               line_color="white", annotation_text=f"진입 ${pos['entry_price']:,.0f}",
                               row=1, col=1)
+                if _atr_val and _atr_val > 0:
+                    fig.add_hline(y=tp_price, line_dash="dash",
+                                  line_color="#26a69a", annotation_text=f"TP ${tp_price:,.0f}",
+                                  row=1, col=1)
+                    fig.add_hline(y=sl_price, line_dash="dash",
+                                  line_color="#ef5350", annotation_text=f"SL ${sl_price:,.0f}",
+                                  row=1, col=1)
 
             vol_colors = ["#ef5350" if c < o else "#26a69a"
                           for c, o in zip(candles["close"], candles["open"])]
@@ -386,6 +420,452 @@ if page == "실시간 현황":
     if auto_refresh:
         time.sleep(10)
         st.rerun()
+
+
+# ═══════════════════════════════════════════════════════════
+#  시뮬레이션 (페이퍼 트레이딩)
+# ═══════════════════════════════════════════════════════════
+elif page == "시뮬레이션":
+    st.title("🧪 시뮬레이션")
+
+    from src.strategies.registry import get_strategy, list_strategies
+    from src.core.database import PaperBalance, PaperPosition, PaperTrade, get_session
+    import ta as _ta
+
+    sim_tab1, sim_tab2 = st.tabs(["📊 실시간 가상매매", "🔬 원샷 시뮬레이션"])
+
+    # ══════════════════════════════════════════════════════
+    #  탭 1: 실시간 가상매매 (페이퍼 트레이딩) — 지속적 데이터 축적
+    # ══════════════════════════════════════════════════════
+    with sim_tab1:
+        st.subheader("실시간 가상매매")
+        st.caption(
+            "모든 전략이 $200 가상자본으로 실시간 매매 중. "
+            "봇 가동 중 자동으로 데이터가 쌓입니다."
+        )
+
+        # ── 전략별 잔고 요약 ──
+        with get_session() as session:
+            balances = session.query(PaperBalance).all()
+            positions = session.query(PaperPosition).all()
+            trades_all = session.query(PaperTrade).order_by(
+                PaperTrade.closed_at.desc()).limit(200).all()
+
+            bal_data = {b.strategy: b for b in balances}
+            pos_data = {}
+            for p in positions:
+                pos_data.setdefault(p.strategy, []).append(p)
+            trade_data = {}
+            for t in trades_all:
+                trade_data.setdefault(t.strategy, []).append(t)
+
+        if not bal_data:
+            st.info("아직 가상매매 데이터가 없습니다. 봇이 가동되면 자동으로 시작됩니다.")
+        else:
+            # 전체 비교 테이블
+            strats = list_strategies()
+            compare_rows = []
+            for s_info in strats:
+                sname = s_info["name"]
+                b = bal_data.get(sname)
+                if not b:
+                    continue
+                pnl = b.balance - b.initial_balance
+                pnl_pct = pnl / b.initial_balance * 100
+                wr = (b.wins / b.total_trades * 100) if b.total_trades > 0 else 0
+                compare_rows.append({
+                    "전략": s_info["label"],
+                    "잔고": f"${b.balance:,.2f}",
+                    "손익": f"${pnl:+,.2f}",
+                    "수익률": f"{pnl_pct:+.1f}%",
+                    "거래수": b.total_trades,
+                    "승률": f"{wr:.1f}%",
+                    "W/L": f"{b.wins}/{b.losses}",
+                })
+
+            if compare_rows:
+                st.dataframe(pd.DataFrame(compare_rows), use_container_width=True,
+                             hide_index=True)
+
+            # ── 전략별 상세 ──
+            for s_info in strats:
+                sname = s_info["name"]
+                b = bal_data.get(sname)
+                if not b:
+                    continue
+
+                pnl = b.balance - b.initial_balance
+                pnl_pct = pnl / b.initial_balance * 100
+                wr = (b.wins / b.total_trades * 100) if b.total_trades > 0 else 0
+
+                with st.expander(
+                    f"{'🟢' if pnl >= 0 else '🔴'} {s_info['label']} — "
+                    f"${b.balance:,.2f} ({pnl_pct:+.1f}%)",
+                    expanded=False,
+                ):
+                    # 메트릭
+                    mc1, mc2, mc3, mc4 = st.columns(4)
+                    mc1.metric("잔고", f"${b.balance:,.2f}",
+                               delta=f"${pnl:+,.2f}")
+                    mc2.metric("거래수", f"{b.total_trades}건")
+                    mc3.metric("승률", f"{wr:.1f}%")
+                    mc4.metric("W/L", f"{b.wins}/{b.losses}")
+
+                    # 현재 포지션
+                    s_positions = pos_data.get(sname, [])
+                    if s_positions:
+                        st.markdown("**열린 포지션:**")
+                        for p in s_positions:
+                            st.markdown(
+                                f"- {p.symbol} **{p.side}** @ `${p.entry_price:,.2f}` "
+                                f"| SL `${p.sl_price:,.2f}` | TP `${p.tp_price:,.2f}`"
+                            )
+
+                    # 최근 거래
+                    s_trades = trade_data.get(sname, [])
+                    if s_trades:
+                        st.markdown("**최근 거래:**")
+                        tdf = pd.DataFrame([{
+                            "심볼": t.symbol, "방향": t.side,
+                            "진입": f"${t.entry_price:,.2f}",
+                            "청산": f"${t.exit_price:,.2f}" if t.exit_price else "—",
+                            "SL": f"${t.sl_price:,.2f}" if t.sl_price else "—",
+                            "TP": f"${t.tp_price:,.2f}" if t.tp_price else "—",
+                            "손익": f"${t.net_pnl:+,.4f}" if t.net_pnl is not None else "—",
+                            "사유": t.reason or "—",
+                            "시간": t.closed_at,
+                        } for t in s_trades[:20]])
+                        st.dataframe(tdf, use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("아직 완료된 거래 없음")
+
+            # 리셋 버튼
+            st.divider()
+            if st.button("🔄 가상매매 초기화 ($200 리셋)", type="secondary"):
+                with get_session() as session:
+                    session.query(PaperTrade).delete()
+                    session.query(PaperPosition).delete()
+                    session.query(PaperBalance).delete()
+                    session.commit()
+                st.success("초기화 완료. 봇이 가동되면 다시 시작됩니다.")
+                st.rerun()
+
+    # ══════════════════════════════════════════════════════
+    #  탭 2: 원샷 시뮬레이션 (기존)
+    # ══════════════════════════════════════════════════════
+    with sim_tab2:
+        st.subheader("원샷 시뮬레이션")
+        st.caption("실제 시장 데이터로 전략을 한번에 테스트합니다. 실제 주문 없음.")
+
+        # ── 설정 ──
+        sim_col1, sim_col2, sim_col3 = st.columns(3)
+    sim_symbols = sim_col1.multiselect(
+        "심볼", SYMBOLS, default=["BTCUSDT", "ETHUSDT"])
+    strategies_list = list_strategies()
+    strategy_names = [s["name"] for s in strategies_list]
+    sim_strategy_name = sim_col2.selectbox(
+        "전략",
+        options=strategy_names,
+        format_func=lambda x: next(
+            (si["label"] for si in strategies_list if si["name"] == x), x),
+        index=strategy_names.index(current_settings.get("strategy", strategy_names[0]))
+        if current_settings.get("strategy") in strategy_names else 0,
+        key="sim_strategy",
+    )
+    sim_capital = sim_col3.number_input(
+        "가상 자본 (USDT)", value=200.0, step=50.0, min_value=50.0)
+
+    sim_col4, sim_col5 = st.columns(2)
+    sim_leverage = sim_col4.select_slider(
+        "레버리지", options=[1, 2, 3, 5, 7, 10, 15, 20], value=7, key="sim_lev")
+    sim_candle_count = sim_col5.slider(
+        "분석 캔들 수 (1분봉)", min_value=100, max_value=1000, value=500, step=100)
+
+    if st.button("시뮬레이션 실행", type="primary"):
+        strategy = get_strategy(sim_strategy_name)
+        sl_mult = getattr(strategy, "SL_ATR_MULT", 8.0)
+        tp_mult = getattr(strategy, "TP_ATR_MULT", 12.0)
+
+        all_results = []
+
+        for symbol in sim_symbols:
+            with st.spinner(f"{symbol} 데이터 로딩..."):
+                async def _fetch_sim(sym=symbol):
+                    client = FuturesClient()
+                    await client.connect()
+                    try:
+                        candles = await client.get_candles(
+                            sym, interval="1m", limit=sim_candle_count)
+                        htf = await client.get_candles(
+                            sym, interval="15m", limit=100)
+                        return candles, htf
+                    finally:
+                        await client.disconnect()
+                candles, htf = run_async(_fetch_sim())
+
+            if candles.empty or len(candles) < 50:
+                st.warning(f"{symbol}: 데이터 부족")
+                continue
+
+            # ATR 계산
+            atr_series = _ta.volatility.AverageTrueRange(
+                candles["high"], candles["low"], candles["close"], window=14
+            ).average_true_range()
+
+            # ── 시뮬레이션 루프 ──
+            sim_balance = sim_capital
+            sim_trades = []
+            sim_position = None  # {side, entry, qty, entry_atr, entry_idx}
+            sim_equity = [sim_capital]
+            sim_strategy = get_strategy(sim_strategy_name)  # 심볼별 독립 인스턴스
+
+            warmup = 50  # 지표 안정화 구간
+
+            for i in range(warmup, len(candles)):
+                window = candles.iloc[:i+1]
+                price = float(window.iloc[-1]["close"])
+                atr = float(atr_series.iloc[i]) if i < len(atr_series) and not pd.isna(atr_series.iloc[i]) else 0
+
+                if atr <= 0:
+                    sim_equity.append(sim_balance)
+                    continue
+
+                # 포지션 있으면 SL/TP 체크
+                if sim_position:
+                    p = sim_position
+                    entry_atr = p["entry_atr"]
+                    sl_dist = entry_atr * sl_mult
+                    tp_dist = entry_atr * tp_mult
+
+                    if p["side"] == "LONG":
+                        sl_price = p["entry"] - sl_dist
+                        tp_price = p["entry"] + tp_dist
+                    else:
+                        sl_price = p["entry"] + sl_dist
+                        tp_price = p["entry"] - tp_dist
+
+                    hit_sl = (p["side"] == "LONG" and price <= sl_price) or \
+                             (p["side"] == "SHORT" and price >= sl_price)
+                    hit_tp = (p["side"] == "LONG" and price >= tp_price) or \
+                             (p["side"] == "SHORT" and price <= tp_price)
+
+                    if hit_sl or hit_tp:
+                        exit_price = sl_price if hit_sl else tp_price
+                        if p["side"] == "LONG":
+                            pnl = (exit_price - p["entry"]) * p["qty"]
+                        else:
+                            pnl = (p["entry"] - exit_price) * p["qty"]
+                        fee = p["entry"] * p["qty"] * 0.0008
+                        sim_balance += pnl - fee
+                        sim_trades.append({
+                            "symbol": symbol, "side": p["side"],
+                            "entry": p["entry"], "exit": exit_price,
+                            "sl": sl_price, "tp": tp_price,
+                            "pnl": round(pnl - fee, 4),
+                            "reason": "SL" if hit_sl else "TP",
+                            "entry_idx": p["entry_idx"], "exit_idx": i,
+                        })
+                        sim_strategy.record_result(pnl - fee)
+                        sim_position = None
+
+                # 포지션 없으면 전략 평가
+                if not sim_position:
+                    htf_window = htf if htf is not None and not htf.empty else None
+                    signal = sim_strategy.evaluate(symbol, window, htf_window)
+
+                    if signal.type in (SignalType.BUY, SignalType.SELL):
+                        invest = sim_balance * 0.3
+                        qty = (invest * sim_leverage) / price
+                        if invest >= 5:
+                            side = "LONG" if signal.type == SignalType.BUY else "SHORT"
+                            sl_d = atr * sl_mult
+                            tp_d = atr * tp_mult
+                            if side == "LONG":
+                                pos_sl = price - sl_d
+                                pos_tp = price + tp_d
+                            else:
+                                pos_sl = price + sl_d
+                                pos_tp = price - tp_d
+                            sim_position = {
+                                "side": side, "entry": price,
+                                "qty": qty, "entry_atr": atr,
+                                "entry_idx": i,
+                                "sl": pos_sl, "tp": pos_tp,
+                            }
+
+                # 미실현 손익 반영한 equity
+                if sim_position:
+                    p = sim_position
+                    if p["side"] == "LONG":
+                        unrealized = (price - p["entry"]) * p["qty"]
+                    else:
+                        unrealized = (p["entry"] - price) * p["qty"]
+                    sim_equity.append(sim_balance + unrealized)
+                else:
+                    sim_equity.append(sim_balance)
+
+            # 미청산 포지션 강제 종료
+            if sim_position:
+                p = sim_position
+                final_price = float(candles.iloc[-1]["close"])
+                if p["side"] == "LONG":
+                    pnl = (final_price - p["entry"]) * p["qty"]
+                else:
+                    pnl = (p["entry"] - final_price) * p["qty"]
+                fee = p["entry"] * p["qty"] * 0.0008
+                sim_balance += pnl - fee
+                sim_trades.append({
+                    "symbol": symbol, "side": p["side"],
+                    "entry": p["entry"], "exit": final_price,
+                    "sl": p.get("sl", 0), "tp": p.get("tp", 0),
+                    "pnl": round(pnl - fee, 4), "reason": "종료",
+                    "entry_idx": p["entry_idx"], "exit_idx": len(candles) - 1,
+                })
+
+            all_results.append({
+                "symbol": symbol, "trades": sim_trades,
+                "equity": sim_equity, "final_balance": sim_balance,
+                "candles": candles,
+            })
+
+        # ── 결과 표시 ──
+        if all_results:
+            st.divider()
+            # 전체 요약
+            total_pnl = sum(r["final_balance"] - sim_capital for r in all_results)
+            total_trades = sum(len(r["trades"]) for r in all_results)
+            total_wins = sum(1 for r in all_results for t in r["trades"] if t["pnl"] > 0)
+            total_losses = sum(1 for r in all_results for t in r["trades"] if t["pnl"] <= 0)
+            win_rate = total_wins / total_trades * 100 if total_trades > 0 else 0
+            tp_count = sum(1 for r in all_results for t in r["trades"] if t["reason"] == "TP")
+            sl_count = sum(1 for r in all_results for t in r["trades"] if t["reason"] == "SL")
+
+            st.subheader("전체 요약")
+            s1, s2, s3, s4, s5 = st.columns(5)
+            pnl_color = "normal" if total_pnl >= 0 else "inverse"
+            s1.metric("총 손익", f"${total_pnl:+,.2f}",
+                      delta=f"{total_pnl/sim_capital*100:+.1f}%")
+            s2.metric("승률", f"{win_rate:.1f}%")
+            s3.metric("거래 수", f"{total_trades}건")
+            s4.metric("TP / SL", f"{tp_count} / {sl_count}")
+            s5.metric("수익/손실", f"{total_wins}W / {total_losses}L")
+
+            # 심볼별 상세
+            for res in all_results:
+                symbol = res["symbol"]
+                trades = res["trades"]
+                equity = res["equity"]
+                cdf = res["candles"]
+
+                sym_pnl = res["final_balance"] - sim_capital
+                sym_wins = sum(1 for t in trades if t["pnl"] > 0)
+                sym_losses = sum(1 for t in trades if t["pnl"] <= 0)
+                sym_tp = sum(1 for t in trades if t["reason"] == "TP")
+                sym_sl = sum(1 for t in trades if t["reason"] == "SL")
+
+                st.divider()
+                st.subheader(f"📈 {symbol}")
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("손익", f"${sym_pnl:+,.2f}")
+                m2.metric("거래", f"{len(trades)}건")
+                m3.metric("승률", f"{sym_wins/(sym_wins+sym_losses)*100:.1f}%"
+                          if (sym_wins + sym_losses) > 0 else "—")
+                m4.metric("TP/SL", f"{sym_tp}/{sym_sl}")
+
+                # 차트: 가격 + 진입/청산 마커
+                tab_chart, tab_equity, tab_trades = st.tabs(["가격 차트", "자산 곡선", "거래 목록"])
+
+                with tab_chart:
+                    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                                        vertical_spacing=0.03, row_heights=[0.8, 0.2])
+                    fig.add_trace(go.Candlestick(
+                        x=cdf.index, open=cdf["open"], high=cdf["high"],
+                        low=cdf["low"], close=cdf["close"], name="Price",
+                    ), row=1, col=1)
+
+                    # 진입/청산 마커 + SL/TP 구간
+                    for t in trades:
+                        color = "#26a69a" if t["pnl"] > 0 else "#ef5350"
+                        marker_sym = "triangle-up" if t["side"] == "LONG" else "triangle-down"
+                        ei = t["entry_idx"]
+                        xi = t["exit_idx"]
+                        x_range = list(cdf.index[ei:xi+1])
+
+                        # SL/TP 수평 구간 (진입~청산 사이)
+                        if t.get("tp") and t.get("sl") and len(x_range) > 1:
+                            fig.add_trace(go.Scatter(
+                                x=x_range, y=[t["tp"]] * len(x_range),
+                                mode="lines", line=dict(color="#26a69a", width=1, dash="dash"),
+                                showlegend=False, hoverinfo="skip",
+                            ), row=1, col=1)
+                            fig.add_trace(go.Scatter(
+                                x=x_range, y=[t["sl"]] * len(x_range),
+                                mode="lines", line=dict(color="#ef5350", width=1, dash="dash"),
+                                showlegend=False, hoverinfo="skip",
+                            ), row=1, col=1)
+
+                        # 진입 마커
+                        fig.add_trace(go.Scatter(
+                            x=[cdf.index[ei]],
+                            y=[t["entry"]],
+                            mode="markers",
+                            marker=dict(symbol=marker_sym, size=12, color="white",
+                                        line=dict(width=2, color=color)),
+                            name=f'{t["side"]} 진입',
+                            showlegend=False,
+                        ), row=1, col=1)
+                        # 청산 마커
+                        fig.add_trace(go.Scatter(
+                            x=[cdf.index[xi]],
+                            y=[t["exit"]],
+                            mode="markers",
+                            marker=dict(symbol="x", size=10, color=color),
+                            name=f'{t["reason"]} ${t["pnl"]:+.2f}',
+                            showlegend=False,
+                        ), row=1, col=1)
+
+                    vol_colors = ["#ef5350" if c < o else "#26a69a"
+                                  for c, o in zip(cdf["close"], cdf["open"])]
+                    fig.add_trace(go.Bar(x=cdf.index, y=cdf["volume"],
+                        marker_color=vol_colors, opacity=0.6, name="Volume"), row=2, col=1)
+
+                    fig.update_layout(template="plotly_dark", height=450,
+                                      xaxis_rangeslider_visible=False,
+                                      margin=dict(l=0, r=0, t=10, b=0))
+                    st.plotly_chart(fig, use_container_width=True)
+
+                with tab_equity:
+                    fig_eq = go.Figure()
+                    fig_eq.add_trace(go.Scatter(
+                        y=equity, mode="lines",
+                        line=dict(color="#00d4aa", width=2), fill="tozeroy"))
+                    fig_eq.add_hline(y=sim_capital, line_dash="dot", line_color="gray",
+                                     annotation_text=f"시작 ${sim_capital:,.0f}")
+                    fig_eq.update_layout(template="plotly_dark", height=300,
+                                         yaxis_title="Balance (USDT)")
+                    st.plotly_chart(fig_eq, use_container_width=True)
+
+                with tab_trades:
+                    if trades:
+                        tdf = pd.DataFrame(trades)
+                        # 가격 포맷팅
+                        price_cols = ["entry", "exit", "sl", "tp"]
+                        for pc in price_cols:
+                            if pc in tdf.columns:
+                                tdf[pc] = tdf[pc].apply(lambda x: f"${x:,.2f}" if x else "—")
+                        tdf["pnl"] = tdf["pnl"].apply(lambda x: f"${x:+,.4f}")
+                        display_cols = ["side", "entry", "sl", "tp", "exit", "pnl", "reason"]
+                        display_cols = [c for c in display_cols if c in tdf.columns]
+                        tdf = tdf.rename(columns={
+                            "side": "방향", "entry": "진입가",
+                            "sl": "손절가", "tp": "익절가",
+                            "exit": "청산가", "pnl": "손익", "reason": "사유",
+                        })
+                        st.dataframe(tdf[["방향", "진입가", "손절가", "익절가", "청산가", "손익", "사유"]],
+                                     use_container_width=True)
+                    else:
+                        st.info("진입 조건을 충족하지 못해 거래가 없습니다.")
 
 
 # ═══════════════════════════════════════════════════════════
