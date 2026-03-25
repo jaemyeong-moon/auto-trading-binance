@@ -7,15 +7,20 @@ Streamlit 대비 ~30MB로 1core/1GB 서버에서도 부담 없이 실행.
 """
 
 import asyncio
+import hashlib
+import hmac
 import json
+import os
+import secrets
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 import uvicorn
 
 from src.core import database as db
@@ -26,6 +31,65 @@ db.init_db()
 app = FastAPI(title="Auto-Trader Mobile")
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"]
+
+# ─── Auth ─────────────────────────────────────────────────
+DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
+SESSION_SECRET = secrets.token_hex(32)  # 서버 재시작 시 세션 만료
+SESSION_MAX_AGE = 7 * 24 * 3600  # 7일
+
+
+def _make_token(timestamp: int) -> str:
+    msg = f"{timestamp}:{DASHBOARD_PASSWORD}"
+    return hmac.new(SESSION_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
+
+
+def _verify_session(request: Request) -> bool:
+    """세션 쿠키 검증. 비밀번호 미설정 시 인증 비활성화."""
+    if not DASHBOARD_PASSWORD:
+        return True
+    cookie = request.cookies.get("session", "")
+    if not cookie or ":" not in cookie:
+        return False
+    try:
+        ts_str, token = cookie.split(":", 1)
+        ts = int(ts_str)
+        if time.time() - ts > SESSION_MAX_AGE:
+            return False
+        return hmac.compare_digest(token, _make_token(ts))
+    except (ValueError, TypeError):
+        return False
+
+
+@app.post("/api/login")
+async def api_login(request: Request):
+    body = await request.json()
+    pw = body.get("password", "")
+    if not DASHBOARD_PASSWORD:
+        return JSONResponse({"ok": False, "error": "비밀번호가 설정되지 않았습니다"})
+    if not hmac.compare_digest(pw, DASHBOARD_PASSWORD):
+        return JSONResponse({"ok": False, "error": "비밀번호가 틀렸습니다"}, status_code=401)
+    ts = int(time.time())
+    token = _make_token(ts)
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie(
+        "session", f"{ts}:{token}",
+        max_age=SESSION_MAX_AGE, httponly=True, samesite="strict",
+    )
+    return resp
+
+
+@app.post("/api/logout")
+async def api_logout():
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie("session")
+    return resp
+
+
+def _auth_guard(request: Request) -> JSONResponse | None:
+    """인증 실패 시 401 반환, 성공 시 None."""
+    if not _verify_session(request):
+        return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+    return None
 
 
 # ─── API endpoints ────────────────────────────────────────
@@ -50,7 +114,8 @@ async def _fetch_live():
 
 
 @app.get("/api/status")
-async def api_status():
+async def api_status(request: Request):
+    if err := _auth_guard(request): return err
     try:
         data = await _fetch_live()
         bot_states = db.get_all_bot_states()
@@ -72,7 +137,8 @@ async def api_status():
 
 
 @app.get("/api/trades")
-async def api_trades(symbol: str | None = None, limit: int = 50):
+async def api_trades(request: Request, symbol: str | None = None, limit: int = 50):
+    if err := _auth_guard(request): return err
     trades = db.get_trades(symbol=symbol, limit=limit)
     return JSONResponse([{
         "id": t.id, "symbol": t.symbol, "side": t.side,
@@ -87,7 +153,8 @@ async def api_trades(symbol: str | None = None, limit: int = 50):
 
 
 @app.get("/api/paper")
-async def api_paper():
+async def api_paper(request: Request):
+    if err := _auth_guard(request): return err
     with db.get_session() as session:
         balances = session.query(db.PaperBalance).all()
         positions = session.query(db.PaperPosition).all()
@@ -105,19 +172,22 @@ async def api_paper():
 
 
 @app.post("/api/bot/{symbol}/start")
-async def api_bot_start(symbol: str):
+async def api_bot_start(request: Request, symbol: str):
+    if err := _auth_guard(request): return err
     db.set_bot_running(symbol, True)
     return JSONResponse({"ok": True, "symbol": symbol, "running": True})
 
 
 @app.post("/api/bot/{symbol}/stop")
-async def api_bot_stop(symbol: str):
+async def api_bot_stop(request: Request, symbol: str):
+    if err := _auth_guard(request): return err
     db.set_bot_running(symbol, False)
     return JSONResponse({"ok": True, "symbol": symbol, "running": False})
 
 
 @app.post("/api/settings")
 async def api_settings_save(request: Request):
+    if err := _auth_guard(request): return err
     body = await request.json()
     for key, value in body.items():
         db.set_setting(key, str(value))
@@ -127,9 +197,79 @@ async def api_settings_save(request: Request):
 # ─── Mobile HTML SPA ──────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
-async def index():
+async def index(request: Request):
+    if DASHBOARD_PASSWORD and not _verify_session(request):
+        return LOGIN_HTML
     return MOBILE_HTML
 
+
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0a0a0f">
+<title>Auto-Trader Login</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #0a0a0f; color: #e0e0e0;
+  display: flex; align-items: center; justify-content: center;
+  min-height: 100vh; padding: 20px;
+}
+.login-box {
+  width: 100%; max-width: 360px; background: #141420;
+  border-radius: 16px; padding: 32px 24px;
+  border: 1px solid #1e1e30;
+}
+.login-box h1 { text-align: center; font-size: 22px; margin-bottom: 8px; }
+.login-box p { text-align: center; font-size: 13px; color: #888; margin-bottom: 24px; }
+.login-box input {
+  width: 100%; padding: 14px 16px; border-radius: 10px;
+  border: 1px solid #1e1e30; background: #0a0a0f; color: #e0e0e0;
+  font-size: 16px; margin-bottom: 12px; outline: none;
+}
+.login-box input:focus { border-color: #6c5ce7; }
+.login-box button {
+  width: 100%; padding: 14px; border: none; border-radius: 10px;
+  background: #6c5ce7; color: white; font-size: 16px; font-weight: 600;
+  cursor: pointer;
+}
+.login-box button:active { opacity: 0.8; }
+.error { color: #ef5350; font-size: 13px; text-align: center; margin-top: 12px; display: none; }
+</style>
+</head>
+<body>
+<div class="login-box">
+  <h1>Auto-Trader</h1>
+  <p>대시보드 접속을 위해 비밀번호를 입력하세요</p>
+  <form onsubmit="doLogin(event)">
+    <input type="password" id="pw" placeholder="비밀번호" autocomplete="current-password" autofocus>
+    <button type="submit">로그인</button>
+  </form>
+  <div class="error" id="err"></div>
+</div>
+<script>
+async function doLogin(e) {
+  e.preventDefault();
+  const pw = document.getElementById('pw').value;
+  const errEl = document.getElementById('err');
+  errEl.style.display = 'none';
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({password: pw}),
+    });
+    const d = await r.json();
+    if (d.ok) { location.href = '/'; }
+    else { errEl.textContent = d.error || '로그인 실패'; errEl.style.display = 'block'; }
+  } catch(e) { errEl.textContent = '서버 연결 실패'; errEl.style.display = 'block'; }
+}
+</script>
+</body>
+</html>"""
 
 MOBILE_HTML = """<!DOCTYPE html>
 <html lang="ko">
@@ -162,6 +302,8 @@ body {
 }
 .top-bar h1 { font-size: 18px; font-weight: 700; }
 .top-bar .status { font-size: 12px; color: var(--dim); }
+.logout-btn { background:none; border:1px solid var(--border); color:var(--dim); padding:4px 10px;
+  border-radius:6px; font-size:11px; cursor:pointer; margin-left:8px; }
 .refresh-dot { width:8px; height:8px; border-radius:50%; background:var(--green); display:inline-block; margin-right:6px; }
 .refresh-dot.off { background:var(--red); }
 
@@ -282,6 +424,7 @@ body {
   <div class="status">
     <span class="refresh-dot" id="connDot"></span>
     <span id="lastUpdate">-</span>
+    <button class="logout-btn" onclick="doLogout()">로그아웃</button>
   </div>
 </div>
 
@@ -387,6 +530,17 @@ body {
 </div>
 
 <script>
+// ─── Auth helpers ────────────────────────────
+async function authFetch(url, opts={}) {
+  const r = await fetch(url, opts);
+  if (r.status === 401) { location.href = '/'; return null; }
+  return r;
+}
+async function doLogout() {
+  await fetch('/api/logout', {method:'POST'});
+  location.href = '/';
+}
+
 // ─── Navigation ──────────────────────────────
 function showPage(name, btn) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -411,7 +565,8 @@ let statusCache = null;
 
 async function loadStatus() {
   try {
-    const r = await fetch('/api/status');
+    const r = await authFetch('/api/status');
+    if (!r) return;
     const d = await r.json();
     if (!d.ok) throw new Error(d.error || 'API 응답 오류');
     statusCache = d;
@@ -483,7 +638,8 @@ function renderStatus(d) {
 
 async function loadRecentTrades() {
   try {
-  const r = await fetch('/api/trades?limit=5');
+  const r = await authFetch('/api/trades?limit=5');
+  if (!r) return;
   const trades = await r.json();
   if (!trades.length) {
     document.getElementById('recentTrades').innerHTML =
@@ -526,13 +682,14 @@ function renderBots(bots) {
 }
 
 async function toggleBot(symbol, start) {
-  await fetch(`/api/bot/${symbol}/${start?'start':'stop'}`, {method:'POST'});
+  await authFetch(`/api/bot/${symbol}/${start?'start':'stop'}`, {method:'POST'});
   loadStatus();
 }
 
 // ─── Trades ──────────────────────────────────
 async function loadTrades() {
-  const r = await fetch('/api/trades?limit=50');
+  const r = await authFetch('/api/trades?limit=50');
+  if (!r) return;
   const trades = await r.json();
 
   if (!trades.length) {
@@ -571,7 +728,8 @@ async function loadTrades() {
 
 // ─── Paper Trading ───────────────────────────
 async function loadPaper() {
-  const r = await fetch('/api/paper');
+  const r = await authFetch('/api/paper');
+  if (!r) return;
   const d = await r.json();
 
   if (!d.balances.length) {
@@ -613,7 +771,8 @@ async function loadSettingsForm() {
   if (!statusCache) await loadStatus();
   // Also load full settings from current DB
   try {
-    const r = await fetch('/api/status');
+    const r = await authFetch('/api/status');
+    if (!r) return;
     const d = await r.json();
     if (d.ok) {
       const s = d.settings;
@@ -630,7 +789,7 @@ async function saveSettings() {
     sl_pct: String(Number(document.getElementById('sSl').value)/100),
     tick_interval: document.getElementById('sTick').value,
   };
-  await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  await authFetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
   alert('설정 저장 완료');
 }
 
