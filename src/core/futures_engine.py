@@ -547,10 +547,16 @@ class FuturesEngine:
                      qty=quantity, invest=f"${invest:.2f}",
                      balance=f"${balance:.2f}", size_pct=f"{size_pct:.0%}")
 
+        # 거래소에 SL/TP 주문 (봇 꺼져도 보호)
+        await self._place_exchange_sl_tp(symbol, direction, price, strategy)
+
         if db.get_setting("webhook_on_open") == "true":
             await webhook.notify_open(symbol, direction, price, quantity, invest)
 
     async def _close_current(self, symbol: str, reason: str = "") -> float:
+        # 거래소 SL/TP 주문 취소 (봇이 직접 청산하므로)
+        await self.client.cancel_open_orders(symbol)
+
         pos = await self.client.get_position(symbol)
         if not pos:
             # 거래소에 포지션 없으면 DB 고아 레코드 정리
@@ -581,6 +587,45 @@ class FuturesEngine:
                 balance=balance, fee=fee, net_pnl=net_pnl)
 
         return pnl
+
+    async def _place_exchange_sl_tp(
+        self, symbol: str, direction: str, entry_price: float, strategy: Strategy,
+    ) -> None:
+        """진입 후 거래소에 SL/TP 주문. ATR 기반 또는 고정 %."""
+        try:
+            state = getattr(strategy, "state", None)
+            entry_atr = getattr(state, "entry_atr", 0) if state else 0
+
+            if entry_atr > 0:
+                sl_mult = getattr(strategy, "SL_ATR_MULT", 6.0)
+                tp_mult = getattr(strategy, "TP_ATR_MULT", 10.0)
+                sl_dist = entry_atr * sl_mult
+                tp_dist = entry_atr * tp_mult
+            else:
+                sl_pct = db.get_setting_float("sl_pct") or 0.005
+                tp_pct = db.get_setting_float("tp_pct") or 0.01
+                sl_dist = entry_price * sl_pct
+                tp_dist = entry_price * tp_pct
+
+            if direction == "LONG":
+                sl_price = entry_price - sl_dist
+                tp_price = entry_price + tp_dist
+            else:
+                sl_price = entry_price + sl_dist
+                tp_price = entry_price - tp_dist
+
+            pos = await self.client.get_position(symbol)
+            qty = pos["quantity"] if pos else 0
+
+            if qty > 0 and sl_price > 0 and tp_price > 0:
+                await self.client.place_sl_tp_orders(
+                    symbol=symbol, side=direction, quantity=qty,
+                    sl_price=sl_price, tp_price=tp_price,
+                )
+                logger.info("engine.sl_tp_placed", symbol=symbol,
+                            sl=f"${sl_price:,.2f}", tp=f"${tp_price:,.2f}")
+        except Exception:
+            logger.exception("engine.sl_tp_place_failed", symbol=symbol)
 
     def _round_qty(self, symbol: str, quantity: float) -> float:
         precision = {

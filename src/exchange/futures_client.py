@@ -190,6 +190,61 @@ class FuturesClient:
             logger.exception("futures.fee_query_error", symbol=symbol)
             return 0.0
 
+    # ─── SL/TP 거래소 주문 (봇 꺼져도 동작) ─────────────
+
+    async def place_sl_tp_orders(
+        self, symbol: str, side: str, quantity: float,
+        sl_price: float, tp_price: float,
+    ) -> dict:
+        """거래소에 STOP_MARKET(SL) + TAKE_PROFIT_MARKET(TP) 주문.
+        봇이 꺼져도 거래소가 자동 청산."""
+        # SL/TP 청산 방향: LONG → SELL, SHORT → BUY
+        close_side = "SELL" if side == "LONG" else "BUY"
+        results = {"sl_order": None, "tp_order": None}
+
+        try:
+            sl_result = await self.client.futures_create_order(
+                symbol=symbol, side=close_side, type="STOP_MARKET",
+                stopPrice=self._round_price(symbol, sl_price),
+                closePosition=True,
+            )
+            results["sl_order"] = sl_result.get("orderId")
+            logger.info("futures.sl_order_placed", symbol=symbol,
+                        sl_price=sl_price, order_id=results["sl_order"])
+        except Exception as e:
+            logger.warning("futures.sl_order_failed", symbol=symbol, error=str(e))
+
+        try:
+            tp_result = await self.client.futures_create_order(
+                symbol=symbol, side=close_side, type="TAKE_PROFIT_MARKET",
+                stopPrice=self._round_price(symbol, tp_price),
+                closePosition=True,
+            )
+            results["tp_order"] = tp_result.get("orderId")
+            logger.info("futures.tp_order_placed", symbol=symbol,
+                        tp_price=tp_price, order_id=results["tp_order"])
+        except Exception as e:
+            logger.warning("futures.tp_order_failed", symbol=symbol, error=str(e))
+
+        return results
+
+    async def cancel_open_orders(self, symbol: str) -> None:
+        """심볼의 모든 미체결 주문 취소 (SL/TP 주문 정리용)."""
+        try:
+            await self.client.futures_cancel_all_open_orders(symbol=symbol)
+            logger.info("futures.orders_cancelled", symbol=symbol)
+        except Exception as e:
+            logger.warning("futures.cancel_orders_failed", symbol=symbol, error=str(e))
+
+    def _round_price(self, symbol: str, price: float) -> str:
+        """심볼별 가격 소수점 자릿수."""
+        precision = {
+            "BTCUSDT": 1, "ETHUSDT": 2, "BNBUSDT": 2,
+            "SOLUSDT": 3, "XRPUSDT": 4,
+        }
+        p = precision.get(symbol, 2)
+        return f"{price:.{p}f}"
+
     async def get_account_summary(self) -> dict:
         """Get account balance + total unrealized PnL."""
         balances = await self.client.futures_account_balance()

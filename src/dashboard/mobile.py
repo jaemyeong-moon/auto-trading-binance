@@ -576,6 +576,19 @@ body {
     <div class="metrics" id="tradeSummary"></div>
   </div>
   <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <div class="card-title" style="margin:0;">차트</div>
+      <select id="tradeChartSymbol" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px;">
+        <option value="BTCUSDT">BTC</option>
+        <option value="ETHUSDT">ETH</option>
+        <option value="BNBUSDT">BNB</option>
+        <option value="SOLUSDT">SOL</option>
+        <option value="XRPUSDT">XRP</option>
+      </select>
+    </div>
+    <div id="tradeChartContainer" style="width:100%;height:300px;border-radius:8px;overflow:hidden;"></div>
+  </div>
+  <div class="card">
     <div class="card-title">거래 내역</div>
     <div id="tradeList"><div class="loading"><div class="spinner"></div></div></div>
   </div>
@@ -682,7 +695,7 @@ function showPage(name, btn) {
   if (btn) btn.classList.add('active');
   // Load data for page
   if (name==='home') loadStatus();
-  else if (name==='trades') loadTrades();
+  else if (name==='trades') { loadTrades(); loadTradeChart(); }
   else if (name==='paper') { loadPaper(); loadPaperTrades(); }
   else if (name==='bots') loadStatus();
   else if (name==='settings') loadSettingsForm();
@@ -1042,6 +1055,66 @@ async function loadChart() {
 
 // 심볼 변경 시 차트 리로드
 document.getElementById('chartSymbol').addEventListener('change', loadChart);
+
+// ─── Trade Chart (거래 현황 페이지) ──────────
+let tradeChart = null;
+let tradeCandleSeries = null;
+
+async function loadTradeChart() {
+  const sym = document.getElementById('tradeChartSymbol').value;
+  try {
+    const r = await authFetch(`/api/candles/${sym}?limit=200`);
+    if (!r) return;
+    const d = await r.json();
+    if (!d.candles || !d.candles.length) return;
+
+    const container = document.getElementById('tradeChartContainer');
+    if (tradeChart) { tradeChart.remove(); }
+    tradeChart = LightweightCharts.createChart(container, {
+      layout: { background: { color: '#141420' }, textColor: '#888' },
+      grid: { vertLines: { color: '#1e1e30' }, horzLines: { color: '#1e1e30' } },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Magnet },
+      rightPriceScale: { borderColor: '#1e1e30' },
+      timeScale: { borderColor: '#1e1e30', timeVisible: true, secondsVisible: false },
+      width: container.clientWidth,
+      height: 300,
+    });
+    tradeCandleSeries = tradeChart.addCandlestickSeries({
+      upColor: '#26a69a', downColor: '#ef5350',
+      borderUpColor: '#26a69a', borderDownColor: '#ef5350',
+      wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+    });
+    tradeCandleSeries.setData(d.candles.map(c => ({
+      time: c.time, open: c.open, high: c.high, low: c.low, close: c.close,
+    })));
+
+    // 실거래 마커 (DB trades)
+    const tr = await authFetch(`/api/trades?symbol=${sym}&limit=20`);
+    if (tr) {
+      const trades = await tr.json();
+      const mk = [];
+      trades.forEach(t => {
+        if (t.closed_at) {
+          const time = Math.floor(new Date(t.closed_at).getTime() / 1000);
+          mk.push({
+            time, position: 'inBar',
+            color: t.net_pnl >= 0 ? '#26a69a' : '#ef5350',
+            shape: 'circle',
+            text: `${t.side} ${fmt(t.net_pnl)}`,
+          });
+        }
+      });
+      mk.sort((a,b) => a.time - b.time);
+      if (mk.length) tradeCandleSeries.setMarkers(mk);
+    }
+
+    new ResizeObserver(() => {
+      tradeChart.applyOptions({ width: container.clientWidth });
+    }).observe(container);
+    tradeChart.timeScale().fitContent();
+  } catch(e) { console.error('loadTradeChart:', e); }
+}
+document.getElementById('tradeChartSymbol').addEventListener('change', loadTradeChart);
 
 // ─── Paper Trades (거래내역) ─────────────────
 async function loadPaperTrades() {
