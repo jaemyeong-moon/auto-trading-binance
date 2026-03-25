@@ -591,28 +591,35 @@ class FuturesEngine:
     async def _place_exchange_sl_tp(
         self, symbol: str, direction: str, entry_price: float, strategy: Strategy,
     ) -> None:
-        """진입 후 거래소에 SL/TP 주문. ATR 기반 또는 고정 %."""
+        """진입 후 거래소에 SL/TP 주문. 전략 자체 SL/TP 우선 사용."""
         try:
             state = getattr(strategy, "state", None)
-            entry_atr = getattr(state, "entry_atr", 0) if state else 0
 
-            if entry_atr > 0:
+            # 전략이 자체 SL/TP를 관리하는 경우 (v9, v10 등)
+            if state and hasattr(state, "sl_price") and state.sl_price > 0:
+                sl_price = state.sl_price
+                tp_price = state.tp_price
+            else:
+                # 엔진 ATR 기반 또는 고정 %
+                entry_atr = getattr(state, "entry_atr", 0) if state else 0
                 sl_mult = getattr(strategy, "SL_ATR_MULT", 6.0)
                 tp_mult = getattr(strategy, "TP_ATR_MULT", 10.0)
-                sl_dist = entry_atr * sl_mult
-                tp_dist = entry_atr * tp_mult
-            else:
-                sl_pct = db.get_setting_float("sl_pct") or 0.005
-                tp_pct = db.get_setting_float("tp_pct") or 0.01
-                sl_dist = entry_price * sl_pct
-                tp_dist = entry_price * tp_pct
 
-            if direction == "LONG":
-                sl_price = entry_price - sl_dist
-                tp_price = entry_price + tp_dist
-            else:
-                sl_price = entry_price + sl_dist
-                tp_price = entry_price - tp_dist
+                if entry_atr > 0 and sl_mult < 50:  # 99.0은 비활성화 표시
+                    sl_dist = entry_atr * sl_mult
+                    tp_dist = entry_atr * tp_mult
+                else:
+                    sl_pct = db.get_setting_float("sl_pct") or 0.005
+                    tp_pct = db.get_setting_float("tp_pct") or 0.01
+                    sl_dist = entry_price * sl_pct
+                    tp_dist = entry_price * tp_pct
+
+                if direction == "LONG":
+                    sl_price = entry_price - sl_dist
+                    tp_price = entry_price + tp_dist
+                else:
+                    sl_price = entry_price + sl_dist
+                    tp_price = entry_price - tp_dist
 
             pos = await self.client.get_position(symbol)
             qty = pos["quantity"] if pos else 0
