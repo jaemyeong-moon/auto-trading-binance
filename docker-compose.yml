@@ -31,3 +31,4 @@ volumes:
   trading-data:
   trading-logs:
   trading-models:
+  
