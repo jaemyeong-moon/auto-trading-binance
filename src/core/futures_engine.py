@@ -118,8 +118,8 @@ class FuturesEngine:
             if self._paper_trader is None:
                 self._paper_trader = PaperTrader()
 
-            candles = await self.client.get_candles(symbol, interval="1m", limit=100)
-            htf = await self.client.get_candles(symbol, interval="15m", limit=50)
+            candles = await self.client.get_candles(symbol, interval="1m", limit=300)
+            htf = await self.client.get_candles(symbol, interval="15m", limit=500)
             if candles.empty:
                 return
 
