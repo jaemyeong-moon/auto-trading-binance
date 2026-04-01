@@ -118,8 +118,8 @@ class FuturesEngine:
             if self._paper_trader is None:
                 self._paper_trader = PaperTrader()
 
-            candles_15m = await self.client.get_candles(symbol, interval="15m", limit=500)
-            htf = await self.client.get_candles(symbol, interval="1h", limit=200)
+            candles_15m = await self.client.get_candles(symbol, interval="15m", limit=200)
+            htf = await self.client.get_candles(symbol, interval="1h", limit=100)
             if candles_15m.empty:
                 return
 
@@ -235,16 +235,16 @@ class FuturesEngine:
     # ═══════════════════════════════════════════════════════
 
     async def _fetch_candles(self, symbol: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """15분봉(메인) + 1시간봉(HTF) 매 틱. 1분/5분은 5틱마다 갱신."""
-        candles_15m = await self.client.get_candles(symbol, interval="15m", limit=500)
-        htf_candles = await self.client.get_candles(symbol, interval="1h", limit=200)
+        """15분봉(메인) + 1시간봉(HTF) 매 틱. 1분/5분은 10틱마다 갱신."""
+        candles_15m = await self.client.get_candles(symbol, interval="15m", limit=200)
+        htf_candles = await self.client.get_candles(symbol, interval="1h", limit=100)
 
-        # 보조 타임프레임: 캐시에서 가져오되, 5틱(~75초)마다 갱신
+        # 보조 타임프레임: 캐시에서 가져오되, 10틱(~5분)마다 갱신
         cache_key = f"_aux_{symbol}"
         aux = getattr(self, cache_key, None)
-        if aux is None or aux.get("age", 0) >= 5:
-            candles_1m = await self.client.get_candles(symbol, interval="1m", limit=500)
-            candles_5m = await self.client.get_candles(symbol, interval="5m", limit=500)
+        if aux is None or aux.get("age", 0) >= 10:
+            candles_1m = await self.client.get_candles(symbol, interval="1m", limit=200)
+            candles_5m = await self.client.get_candles(symbol, interval="5m", limit=200)
             setattr(self, cache_key, {
                 "1m": candles_1m, "5m": candles_5m, "age": 0,
             })
