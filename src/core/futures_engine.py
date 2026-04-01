@@ -118,8 +118,8 @@ class FuturesEngine:
             if self._paper_trader is None:
                 self._paper_trader = PaperTrader()
 
-            candles_15m = await self.client.get_candles(symbol, interval="15m", limit=1000)
-            htf = await self.client.get_candles(symbol, interval="1h", limit=500)
+            candles_15m = await self.client.get_candles(symbol, interval="15m", limit=500)
+            htf = await self.client.get_candles(symbol, interval="1h", limit=200)
             if candles_15m.empty:
                 return
 
@@ -236,8 +236,8 @@ class FuturesEngine:
 
     async def _fetch_candles(self, symbol: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         """15분봉(메인) + 1시간봉(HTF) 매 틱. 1분/5분은 5틱마다 갱신."""
-        candles_15m = await self.client.get_candles(symbol, interval="15m", limit=1000)
-        htf_candles = await self.client.get_candles(symbol, interval="1h", limit=500)
+        candles_15m = await self.client.get_candles(symbol, interval="15m", limit=500)
+        htf_candles = await self.client.get_candles(symbol, interval="1h", limit=200)
 
         # 보조 타임프레임: 캐시에서 가져오되, 5틱(~75초)마다 갱신
         cache_key = f"_aux_{symbol}"
