@@ -296,6 +296,151 @@ def _build_candlestick_chart(cdf, symbol, pos=None, tp_price=None, sl_price=None
     return fig
 
 
+def _render_tradingview_chart(symbol: str, pos=None):
+    """바이낸스 TradingView 차트 + 거래 마커 오버레이.
+
+    TradingView 위젯: 전체 기간, 모든 타임프레임, 인디케이터 사용 가능.
+    아래에 거래 마커 테이블을 같이 표시.
+    """
+    import streamlit.components.v1 as components
+    from src.core.database import PaperTrade, PaperPosition, get_session as _gs
+    import json
+
+    # TradingView 심볼 매핑
+    tv_symbol = f"BINANCE:{symbol}.P"  # .P = Perpetual Futures
+
+    # ── 거래 마커 데이터 수집 ──
+    markers_js = "[]"
+    trade_info_html = ""
+    try:
+        with _gs() as session:
+            trades = session.query(PaperTrade).filter(
+                PaperTrade.symbol == symbol,
+                PaperTrade.exit_price.isnot(None),
+            ).order_by(PaperTrade.closed_at.desc()).limit(50).all()
+
+            positions = session.query(PaperPosition).filter(
+                PaperPosition.symbol == symbol,
+            ).all()
+
+            # 거래 마커 → TradingView Lightweight Charts markers
+            markers = []
+            for t in trades:
+                if t.opened_at:
+                    ts = int(t.opened_at.timestamp())
+                    is_win = (t.net_pnl or 0) > 0
+                    markers.append({
+                        "time": ts,
+                        "position": "belowBar" if t.side == "LONG" else "aboveBar",
+                        "color": "#26a69a" if t.side == "LONG" else "#ef5350",
+                        "shape": "arrowUp" if t.side == "LONG" else "arrowDown",
+                        "text": f"{t.strategy[:6]} IN",
+                    })
+                if t.closed_at and t.exit_price:
+                    ts = int(t.closed_at.timestamp())
+                    is_win = (t.net_pnl or 0) > 0
+                    pnl_str = f"${t.net_pnl:+.2f}" if t.net_pnl else ""
+                    markers.append({
+                        "time": ts,
+                        "position": "aboveBar" if t.side == "LONG" else "belowBar",
+                        "color": "#26a69a" if is_win else "#ef5350",
+                        "shape": "circle",
+                        "text": f"{t.reason or 'X'} {pnl_str}",
+                    })
+
+            markers.sort(key=lambda m: m["time"])
+            markers_js = json.dumps(markers)
+
+            # 열린 포지션 정보
+            pos_lines = []
+            for p in positions:
+                color = "#2196f3" if p.side == "LONG" else "#ff5722"
+                pos_lines.append(
+                    f'<div style="color:{color};font-size:12px;">'
+                    f'{p.strategy[:12]} {p.side} @ ${p.entry_price:,.2f}'
+                    f'{f" | SL ${p.sl_price:,.2f}" if p.sl_price else ""}'
+                    f'{f" | TP ${p.tp_price:,.2f}" if p.tp_price else ""}'
+                    f'</div>'
+                )
+            if pos_lines:
+                trade_info_html = (
+                    '<div style="background:#1a1a2e;padding:8px;border-radius:4px;'
+                    'margin-bottom:4px;">'
+                    '<div style="color:#888;font-size:11px;">열린 페이퍼 포지션</div>'
+                    + "".join(pos_lines) + '</div>'
+                )
+    except Exception:
+        pass
+
+    # ── TradingView Advanced Chart Widget ──
+    chart_html = f"""
+    <div style="position:relative;">
+        {trade_info_html}
+        <!-- TradingView Widget BEGIN -->
+        <div class="tradingview-widget-container" style="height:600px;width:100%;">
+            <div id="tradingview_{symbol}" style="height:100%;width:100%;"></div>
+        </div>
+        <script type="text/javascript"
+            src="https://s3.tradingview.com/tv.js"></script>
+        <script type="text/javascript">
+        new TradingView.widget({{
+            "autosize": true,
+            "symbol": "{tv_symbol}",
+            "interval": "15",
+            "timezone": "Asia/Seoul",
+            "theme": "dark",
+            "style": "1",
+            "locale": "kr",
+            "toolbar_bg": "#131722",
+            "enable_publishing": false,
+            "allow_symbol_change": true,
+            "container_id": "tradingview_{symbol}",
+            "hide_side_toolbar": false,
+            "studies": [
+                "MAExp@tv-basicstudies",
+                "Volume@tv-basicstudies",
+                "RSI@tv-basicstudies"
+            ],
+            "show_popup_button": true,
+            "popup_width": "1000",
+            "popup_height": "650"
+        }});
+        </script>
+        <!-- TradingView Widget END -->
+    </div>
+    """
+
+    components.html(chart_html, height=650, scrolling=False)
+
+    # ── 거래 마커 테이블 (차트 아래) ──
+    try:
+        with _gs() as session:
+            recent = session.query(PaperTrade).filter(
+                PaperTrade.symbol == symbol,
+                PaperTrade.exit_price.isnot(None),
+            ).order_by(PaperTrade.closed_at.desc()).limit(10).all()
+
+            if recent:
+                st.caption("최근 거래 (차트에서 해당 시간대로 이동하여 확인)")
+                rows = []
+                for t in recent:
+                    is_win = (t.net_pnl or 0) > 0
+                    rows.append({
+                        "전략": t.strategy[:15],
+                        "방향": t.side,
+                        "진입": f"${t.entry_price:,.2f}",
+                        "청산": f"${t.exit_price:,.2f}" if t.exit_price else "-",
+                        "손익": f"${t.net_pnl:+,.2f}" if t.net_pnl else "-",
+                        "사유": t.reason or "-",
+                        "진입시간": str(t.opened_at)[:16] if t.opened_at else "-",
+                        "청산시간": str(t.closed_at)[:16] if t.closed_at else "-",
+                    })
+                st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                             hide_index=True)
+    except Exception:
+        pass
+
+
 def build_trade_lifecycle_chart(symbol: str | None = None, limit: int = 20):
     """포지션 라이프사이클 차트: 진입 → TP/SL 도달까지 가격 움직임.
 
@@ -716,20 +861,24 @@ if page == "실시간 현황":
 | 거래량 | {vol_icon} x`{ind['vol_ratio']:.1f}` |
 """, unsafe_allow_html=True)
 
-        # ── 멀티 타임프레임 차트 (1m / 5m / 15m / 1d) ──
+        # ── 차트 ──
         tf_candles = analysis.get("tf_candles", {})
-        if not candles.empty and "ema3" in candles.columns:
+        if not candles.empty:
             _chart_atr = locals().get("_atr_val")
             _chart_tp = locals().get("tp_price")
             _chart_sl = locals().get("sl_price")
 
-            tf_tabs = st.tabs(["1분봉", "5분봉", "15분봉", "일봉"])
-            tf_keys = ["1m", "5m", "15m", "1d"]
+            tf_tabs = st.tabs(["바이낸스 차트", "1분봉", "5분봉", "15분봉", "일봉"])
+            tf_keys = [None, "1m", "5m", "15m", "1d"]
 
             for tab, tf_key in zip(tf_tabs, tf_keys):
                 with tab:
+                    if tf_key is None:
+                        # ── 바이낸스 차트 (TradingView + 거래 마커) ──
+                        _render_tradingview_chart(symbol, pos)
+                        continue
                     cdf = tf_candles.get(tf_key, pd.DataFrame())
-                    if cdf.empty:
+                    if cdf.empty or "ema3" not in cdf.columns:
                         st.caption(f"{tf_key} 데이터 없음")
                         continue
                     fig = _build_candlestick_chart(
