@@ -119,15 +119,16 @@ class FuturesEngine:
                 self._paper_trader = PaperTrader()
 
             candles_15m = await self.client.get_candles(symbol, interval="15m", limit=1000)
-            candles_1m = await self.client.get_candles(symbol, interval="1m", limit=500)
-            candles_5m = await self.client.get_candles(symbol, interval="5m", limit=500)
             htf = await self.client.get_candles(symbol, interval="1h", limit=500)
             if candles_15m.empty:
                 return
 
-            # 보조 타임프레임을 attrs로 부착
-            candles_15m.attrs["candles_1m"] = candles_1m
-            candles_15m.attrs["candles_5m"] = candles_5m
+            # 보조 TF는 메인 루프의 캐시에서 재사용
+            cache_key = f"_aux_{symbol}"
+            aux = getattr(self, cache_key, None)
+            if aux:
+                candles_15m.attrs["candles_1m"] = aux["1m"]
+                candles_15m.attrs["candles_5m"] = aux["5m"]
             candles_15m.attrs["candles_15m"] = candles_15m
 
             await self._paper_trader.tick(
@@ -234,16 +235,26 @@ class FuturesEngine:
     # ═══════════════════════════════════════════════════════
 
     async def _fetch_candles(self, symbol: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """15분봉(메인) + 1분봉/5분봉(보조) + 1시간봉(HTF) 조회."""
+        """15분봉(메인) + 1시간봉(HTF) 매 틱. 1분/5분은 5틱마다 갱신."""
         candles_15m = await self.client.get_candles(symbol, interval="15m", limit=1000)
-        candles_1m = await self.client.get_candles(symbol, interval="1m", limit=500)
-        candles_5m = await self.client.get_candles(symbol, interval="5m", limit=500)
         htf_candles = await self.client.get_candles(symbol, interval="1h", limit=500)
 
-        # 보조 타임프레임을 attrs로 부착
+        # 보조 타임프레임: 캐시에서 가져오되, 5틱(~75초)마다 갱신
+        cache_key = f"_aux_{symbol}"
+        aux = getattr(self, cache_key, None)
+        if aux is None or aux.get("age", 0) >= 5:
+            candles_1m = await self.client.get_candles(symbol, interval="1m", limit=500)
+            candles_5m = await self.client.get_candles(symbol, interval="5m", limit=500)
+            setattr(self, cache_key, {
+                "1m": candles_1m, "5m": candles_5m, "age": 0,
+            })
+        else:
+            aux["age"] = aux.get("age", 0) + 1
+
+        aux = getattr(self, cache_key)
         if not candles_15m.empty:
-            candles_15m.attrs["candles_1m"] = candles_1m
-            candles_15m.attrs["candles_5m"] = candles_5m
+            candles_15m.attrs["candles_1m"] = aux["1m"]
+            candles_15m.attrs["candles_5m"] = aux["5m"]
             candles_15m.attrs["candles_15m"] = candles_15m
         return candles_15m, htf_candles
 
