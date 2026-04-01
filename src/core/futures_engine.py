@@ -109,6 +109,8 @@ class FuturesEngine:
                 else:
                     logger.exception("engine.tick_error", symbol=symbol)
             tick_interval = db.get_setting_int("tick_interval")
+            logger.debug("engine.tick_done", symbol=symbol, tick=tick_count,
+                         sleep=tick_interval)
             await asyncio.sleep(tick_interval)
 
     async def _run_paper_trading(self, symbol: str) -> None:
