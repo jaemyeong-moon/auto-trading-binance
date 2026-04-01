@@ -201,8 +201,8 @@ class FuturesEngine:
     async def _run_auto_optimize(self, symbol: str) -> None:
         """최근 데이터 기반 TP/SL 배수 자동 최적화."""
         try:
-            candles = await self.client.get_candles(symbol, interval="1m", limit=500)
-            htf = await self.client.get_candles(symbol, interval="15m", limit=100)
+            candles = await self.client.get_candles(symbol, interval="15m", limit=300)
+            htf = await self.client.get_candles(symbol, interval="1h", limit=100)
             if len(candles) < 200:
                 return
             result = run_optimizer(candles, htf)
