@@ -82,18 +82,37 @@ def fetch_all(symbols: list[str]) -> dict:
 
 
 def fetch_analysis(symbol: str) -> dict:
-    """1분봉 + EMA + 전략 신호."""
+    """멀티 타임프레임 캔들 + EMA + 전략 신호."""
+    TIMEFRAMES = {
+        "1m": {"limit": 500, "label": "1분봉"},
+        "5m": {"limit": 300, "label": "5분봉"},
+        "15m": {"limit": 200, "label": "15분봉"},
+        "1d": {"limit": 120, "label": "일봉"},
+    }
+
     async def _fetch():
         client = FuturesClient()
         await client.connect()
         try:
-            return await client.get_candles(symbol, interval="1m", limit=100)
+            result = {}
+            for tf, cfg in TIMEFRAMES.items():
+                try:
+                    result[tf] = await client.get_candles(symbol, interval=tf, limit=cfg["limit"])
+                except Exception:
+                    result[tf] = pd.DataFrame()
+            return result
         finally:
             await client.disconnect()
 
-    candles = run_async(_fetch())
+    tf_candles = run_async(_fetch())
+
+    # 15분봉 기준으로 지표/신호 계산 (메인 타임프레임)
+    candles = tf_candles.get("15m", pd.DataFrame())
     if candles.empty:
-        return {"candles": candles, "signal": None, "indicators": {}}
+        # 15분봉 실패 시 1분봉 폴백
+        candles = tf_candles.get("1m", pd.DataFrame())
+    if candles.empty:
+        return {"candles": candles, "tf_candles": tf_candles, "signal": None, "indicators": {}}
 
     df = candles.copy()
     close = df["close"]
@@ -113,15 +132,28 @@ def fetch_analysis(symbol: str) -> dict:
     trend = "상승" if ema3.iloc[-1] > ema8.iloc[-1] > ema20.iloc[-1] else \
             "하락" if ema3.iloc[-1] < ema8.iloc[-1] < ema20.iloc[-1] else "혼조"
 
+    # 15분봉 기반으로 전략 신호 계산
+    htf_1h = tf_candles.get("1d", pd.DataFrame())  # 일봉을 HTF로 사용
     strategy = MomentumFlipScalper()
-    signal = strategy.evaluate(symbol, candles)
+    signal = strategy.evaluate(symbol, candles, htf_1h if not htf_1h.empty else None)
 
     df["ema3"] = ema3
     df["ema8"] = ema8
     df["ema20"] = ema20
 
+    # 모든 타임프레임에 EMA 추가
+    for tf, tf_df in tf_candles.items():
+        if tf_df.empty:
+            continue
+        c = tf_df["close"]
+        tf_copy = tf_df.copy()
+        tf_copy["ema3"] = c.ewm(span=3, adjust=False).mean()
+        tf_copy["ema8"] = c.ewm(span=8, adjust=False).mean()
+        tf_copy["ema20"] = c.ewm(span=20, adjust=False).mean()
+        tf_candles[tf] = tf_copy
+
     return {
-        "candles": df, "signal": signal,
+        "candles": df, "tf_candles": tf_candles, "signal": signal,
         "indicators": {
             "ema3": ema3.iloc[-1], "ema8": ema8.iloc[-1], "ema20": ema20.iloc[-1],
             "ema_gap_pct": ema_gap, "cross_up": cross_up, "cross_down": cross_down,
@@ -129,6 +161,336 @@ def fetch_analysis(symbol: str) -> dict:
             "price": close.iloc[-1],
         },
     }
+
+
+def _build_candlestick_chart(cdf, symbol, pos=None, tp_price=None, sl_price=None,
+                              _atr_val=None, show_trades=True, height=550):
+    """바이낸스 스타일 캔들스틱 차트 생성 (재사용 가능)."""
+    from src.core.database import PaperTrade, PaperPosition, get_session as _get_session
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        vertical_spacing=0.03, row_heights=[0.75, 0.25])
+
+    # 캔들스틱
+    fig.add_trace(go.Candlestick(
+        x=cdf.index, open=cdf["open"], high=cdf["high"],
+        low=cdf["low"], close=cdf["close"], name="Price",
+        increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
+        increasing_fillcolor="#26a69a", decreasing_fillcolor="#ef5350",
+    ), row=1, col=1)
+
+    # EMA
+    if "ema3" in cdf.columns:
+        fig.add_trace(go.Scatter(x=cdf.index, y=cdf["ema3"],
+            name="EMA(3)", line=dict(color="#ffeb3b", width=1)), row=1, col=1)
+    if "ema8" in cdf.columns:
+        fig.add_trace(go.Scatter(x=cdf.index, y=cdf["ema8"],
+            name="EMA(8)", line=dict(color="#ff9800", width=1)), row=1, col=1)
+    if "ema20" in cdf.columns:
+        fig.add_trace(go.Scatter(x=cdf.index, y=cdf["ema20"],
+            name="EMA(20)", line=dict(color="#9c27b0", width=1, dash="dash")), row=1, col=1)
+
+    # 실거래 포지션 라인
+    if pos:
+        fig.add_hline(y=pos["entry_price"], line_dash="dot",
+                      line_color="white", annotation_text=f"진입 ${pos['entry_price']:,.0f}",
+                      row=1, col=1)
+        if _atr_val and _atr_val > 0 and tp_price and sl_price:
+            fig.add_hline(y=tp_price, line_dash="dash",
+                          line_color="#26a69a", annotation_text=f"TP ${tp_price:,.0f}",
+                          row=1, col=1)
+            fig.add_hline(y=sl_price, line_dash="dash",
+                          line_color="#ef5350", annotation_text=f"SL ${sl_price:,.0f}",
+                          row=1, col=1)
+
+    # 페이퍼 거래 마커
+    if show_trades:
+        try:
+            chart_start = cdf.index[0]
+            with _get_session() as _session:
+                paper_trades = _session.query(PaperTrade).filter(
+                    PaperTrade.symbol == symbol,
+                    PaperTrade.opened_at >= chart_start,
+                ).order_by(PaperTrade.opened_at).all()
+
+                paper_positions = _session.query(PaperPosition).filter(
+                    PaperPosition.symbol == symbol,
+                ).all()
+
+                for pt in paper_trades:
+                    is_win = pt.net_pnl is not None and pt.net_pnl > 0
+                    color = "#26a69a" if is_win else "#ef5350"
+                    marker_sym = "triangle-up" if pt.side == "LONG" else "triangle-down"
+
+                    if pt.opened_at is not None:
+                        fig.add_trace(go.Scatter(
+                            x=[pt.opened_at], y=[pt.entry_price],
+                            mode="markers+text",
+                            marker=dict(symbol=marker_sym, size=14, color="white",
+                                        line=dict(width=2, color=color)),
+                            text=[f"{pt.strategy[:6]}"],
+                            textposition="top center",
+                            textfont=dict(size=8, color=color),
+                            showlegend=False,
+                            hovertext=f"{pt.strategy} {pt.side} 진입\n${pt.entry_price:,.2f}",
+                            hoverinfo="text",
+                        ), row=1, col=1)
+
+                    if pt.closed_at is not None and pt.exit_price:
+                        pnl_text = f"${pt.net_pnl:+,.2f}" if pt.net_pnl is not None else ""
+                        fig.add_trace(go.Scatter(
+                            x=[pt.closed_at], y=[pt.exit_price],
+                            mode="markers+text",
+                            marker=dict(symbol="x", size=12, color=color,
+                                        line=dict(width=2)),
+                            text=[pnl_text],
+                            textposition="bottom center",
+                            textfont=dict(size=8, color=color),
+                            showlegend=False,
+                            hovertext=f"{pt.strategy} {pt.reason or 'close'}\n"
+                                      f"${pt.exit_price:,.2f} | {pnl_text}",
+                            hoverinfo="text",
+                        ), row=1, col=1)
+
+                for pp in paper_positions:
+                    pp_color = "#2196f3" if pp.side == "LONG" else "#ff5722"
+                    fig.add_hline(
+                        y=pp.entry_price, line_dash="dot", line_color=pp_color,
+                        annotation_text=f"{pp.strategy[:8]} {pp.side} ${pp.entry_price:,.0f}",
+                        annotation_font_size=9, annotation_font_color=pp_color,
+                        row=1, col=1,
+                    )
+                    if pp.sl_price:
+                        fig.add_hline(
+                            y=pp.sl_price, line_dash="dash",
+                            line_color="#ef5350", line_width=0.5,
+                            annotation_text=f"SL ${pp.sl_price:,.0f}",
+                            annotation_font_size=8, row=1, col=1,
+                        )
+                    if pp.tp_price:
+                        fig.add_hline(
+                            y=pp.tp_price, line_dash="dash",
+                            line_color="#26a69a", line_width=0.5,
+                            annotation_text=f"TP ${pp.tp_price:,.0f}",
+                            annotation_font_size=8, row=1, col=1,
+                        )
+        except Exception:
+            pass
+
+    # 거래량
+    vol_colors = ["#ef5350" if c < o else "#26a69a"
+                  for c, o in zip(cdf["close"], cdf["open"])]
+    fig.add_trace(go.Bar(x=cdf.index, y=cdf["volume"],
+        marker_color=vol_colors, opacity=0.6, name="Volume"), row=2, col=1)
+
+    fig.update_layout(
+        template="plotly_dark", height=height,
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=0, r=0, t=10, b=0),
+        legend=dict(orientation="h", y=1.02),
+        yaxis=dict(side="right"),
+        yaxis2=dict(side="right"),
+    )
+    fig.update_xaxes(gridcolor="rgba(128,128,128,0.1)", showgrid=True)
+    fig.update_yaxes(gridcolor="rgba(128,128,128,0.1)", showgrid=True)
+    return fig
+
+
+def build_trade_lifecycle_chart(symbol: str | None = None, limit: int = 20):
+    """포지션 라이프사이클 차트: 진입 → TP/SL 도달까지 가격 움직임.
+
+    각 거래를 개별 서브플롯으로 표시:
+    - 진입가(흰색), TP(녹색), SL(빨간색) 수평선
+    - 진입~청산 구간의 실제 캔들 데이터
+    - 결과에 따라 색상 (수익=녹색, 손실=빨간색)
+    """
+    from src.core.database import PaperTrade, get_session as _get_session
+    from src.exchange.futures_client import FuturesClient
+
+    with _get_session() as session:
+        query = session.query(PaperTrade).filter(
+            PaperTrade.exit_price.isnot(None),
+            PaperTrade.sl_price.isnot(None),
+            PaperTrade.tp_price.isnot(None),
+        )
+        if symbol:
+            query = query.filter(PaperTrade.symbol == symbol)
+        trades = query.order_by(PaperTrade.closed_at.desc()).limit(limit).all()
+        # 리스트 복사 (세션 밖 사용)
+        trade_list = [{
+            "id": t.id, "strategy": t.strategy, "symbol": t.symbol,
+            "side": t.side, "entry_price": t.entry_price,
+            "exit_price": t.exit_price, "sl_price": t.sl_price,
+            "tp_price": t.tp_price, "net_pnl": t.net_pnl,
+            "reason": t.reason, "opened_at": t.opened_at,
+            "closed_at": t.closed_at,
+        } for t in trades]
+
+    if not trade_list:
+        return None
+
+    # 시간순 정렬
+    trade_list.reverse()
+
+    # 각 거래별 미니 차트 생성
+    n = len(trade_list)
+    cols_per_row = min(3, n)
+    rows = (n + cols_per_row - 1) // cols_per_row
+
+    fig = make_subplots(
+        rows=rows, cols=cols_per_row,
+        subplot_titles=[
+            f"{t['strategy'][:10]} {t['side']} {'✓' if (t['net_pnl'] or 0) > 0 else '✗'}"
+            for t in trade_list
+        ],
+        vertical_spacing=0.08,
+        horizontal_spacing=0.04,
+    )
+
+    for idx, t in enumerate(trade_list):
+        row = idx // cols_per_row + 1
+        col = idx % cols_per_row + 1
+
+        entry = t["entry_price"]
+        sl = t["sl_price"]
+        tp = t["tp_price"]
+        exit_p = t["exit_price"]
+        is_win = (t["net_pnl"] or 0) > 0
+        is_long = t["side"] == "LONG"
+
+        # 가격 범위 계산
+        prices = [entry, sl, tp, exit_p]
+        p_min = min(prices) * 0.9995
+        p_max = max(prices) * 1.0005
+        p_range = p_max - p_min
+
+        # TP/SL 영역 (배경)
+        if is_long:
+            # LONG: 진입~TP 녹색, 진입~SL 빨간색
+            fig.add_shape(
+                type="rect", x0=0, x1=1, y0=entry, y1=tp,
+                xref=f"x{idx+1}" if idx > 0 else "x",
+                yref=f"y{idx+1}" if idx > 0 else "y",
+                fillcolor="rgba(38,166,154,0.1)", line_width=0,
+                row=row, col=col,
+            )
+            fig.add_shape(
+                type="rect", x0=0, x1=1, y0=sl, y1=entry,
+                xref=f"x{idx+1}" if idx > 0 else "x",
+                yref=f"y{idx+1}" if idx > 0 else "y",
+                fillcolor="rgba(239,83,80,0.1)", line_width=0,
+                row=row, col=col,
+            )
+        else:
+            # SHORT: 진입~TP(아래) 녹색, 진입~SL(위) 빨간색
+            fig.add_shape(
+                type="rect", x0=0, x1=1, y0=tp, y1=entry,
+                xref=f"x{idx+1}" if idx > 0 else "x",
+                yref=f"y{idx+1}" if idx > 0 else "y",
+                fillcolor="rgba(38,166,154,0.1)", line_width=0,
+                row=row, col=col,
+            )
+            fig.add_shape(
+                type="rect", x0=0, x1=1, y0=entry, y1=sl,
+                xref=f"x{idx+1}" if idx > 0 else "x",
+                yref=f"y{idx+1}" if idx > 0 else "y",
+                fillcolor="rgba(239,83,80,0.1)", line_width=0,
+                row=row, col=col,
+            )
+
+        # 가격 이동 경로: 진입 → 청산
+        exit_color = "#26a69a" if is_win else "#ef5350"
+        pnl_text = f"${t['net_pnl']:+,.2f}" if t["net_pnl"] is not None else ""
+        reason = t["reason"] or ""
+
+        # 진입점과 청산점을 화살표로 연결
+        fig.add_trace(go.Scatter(
+            x=[0, 1], y=[entry, exit_p],
+            mode="lines+markers",
+            line=dict(color=exit_color, width=3),
+            marker=dict(size=[12, 14],
+                        symbol=["circle", "x" if not is_win else "star"],
+                        color=["white", exit_color],
+                        line=dict(width=2, color=exit_color)),
+            showlegend=False,
+            hovertext=[
+                f"진입 ${entry:,.2f}",
+                f"청산 ${exit_p:,.2f}\n{reason} {pnl_text}",
+            ],
+            hoverinfo="text",
+        ), row=row, col=col)
+
+        # TP 라인
+        fig.add_trace(go.Scatter(
+            x=[0, 1], y=[tp, tp],
+            mode="lines",
+            line=dict(color="#26a69a", width=1, dash="dash"),
+            showlegend=False,
+            hovertext=f"TP ${tp:,.2f}",
+            hoverinfo="text",
+        ), row=row, col=col)
+
+        # SL 라인
+        fig.add_trace(go.Scatter(
+            x=[0, 1], y=[sl, sl],
+            mode="lines",
+            line=dict(color="#ef5350", width=1, dash="dash"),
+            showlegend=False,
+            hovertext=f"SL ${sl:,.2f}",
+            hoverinfo="text",
+        ), row=row, col=col)
+
+        # 진입가 라인
+        fig.add_trace(go.Scatter(
+            x=[0, 1], y=[entry, entry],
+            mode="lines",
+            line=dict(color="rgba(255,255,255,0.5)", width=1, dash="dot"),
+            showlegend=False,
+        ), row=row, col=col)
+
+        # TP/SL % 표시
+        if is_long:
+            tp_pct = (tp - entry) / entry * 100
+            sl_pct = (entry - sl) / entry * 100
+        else:
+            tp_pct = (entry - tp) / entry * 100
+            sl_pct = (sl - entry) / entry * 100
+
+        # 주석
+        fig.add_annotation(
+            x=1.05, y=tp,
+            text=f"TP +{tp_pct:.1f}%",
+            font=dict(size=8, color="#26a69a"),
+            showarrow=False, xanchor="left",
+            row=row, col=col,
+        )
+        fig.add_annotation(
+            x=1.05, y=sl,
+            text=f"SL -{sl_pct:.1f}%",
+            font=dict(size=8, color="#ef5350"),
+            showarrow=False, xanchor="left",
+            row=row, col=col,
+        )
+        fig.add_annotation(
+            x=0.5, y=exit_p,
+            text=f"{reason} {pnl_text}",
+            font=dict(size=9, color=exit_color, family="monospace"),
+            showarrow=False, yshift=12 if exit_p > entry else -12,
+            row=row, col=col,
+        )
+
+    chart_height = max(300, rows * 250)
+    fig.update_layout(
+        template="plotly_dark",
+        height=chart_height,
+        margin=dict(l=0, r=40, t=30, b=0),
+        showlegend=False,
+    )
+    # x축 숨기기 (진입→청산 방향만 표현)
+    fig.update_xaxes(showticklabels=False, showgrid=False)
+    fig.update_yaxes(side="right", gridcolor="rgba(128,128,128,0.1)")
+
+    return fig
 
 
 def load_trades_df(symbol: str | None = None) -> pd.DataFrame:
@@ -155,7 +517,7 @@ current_settings = db.get_all_settings()
 st.sidebar.caption(
     f"x{current_settings['leverage']} 레버리지 · "
     f"잔고 {float(current_settings['position_size_pct'])*100:.0f}% 투자 · "
-    f"1분봉"
+    f"15분봉"
 )
 st.sidebar.divider()
 page = st.sidebar.radio("페이지", ["실시간 현황", "시뮬레이션", "백테스팅", "거래 내역", "설정"])
@@ -354,44 +716,30 @@ if page == "실시간 현황":
 | 거래량 | {vol_icon} x`{ind['vol_ratio']:.1f}` |
 """, unsafe_allow_html=True)
 
-        # ── 1분봉 차트 ──
+        # ── 멀티 타임프레임 차트 (1m / 5m / 15m / 1d) ──
+        tf_candles = analysis.get("tf_candles", {})
         if not candles.empty and "ema3" in candles.columns:
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                                vertical_spacing=0.03, row_heights=[0.75, 0.25])
-            fig.add_trace(go.Candlestick(
-                x=candles.index, open=candles["open"], high=candles["high"],
-                low=candles["low"], close=candles["close"], name="Price",
-            ), row=1, col=1)
-            fig.add_trace(go.Scatter(x=candles.index, y=candles["ema3"],
-                name="EMA(3)", line=dict(color="#ffeb3b", width=1.5)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=candles.index, y=candles["ema8"],
-                name="EMA(8)", line=dict(color="#ff9800", width=1.5)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=candles.index, y=candles["ema20"],
-                name="EMA(20)", line=dict(color="#9c27b0", width=1, dash="dash")), row=1, col=1)
+            _chart_atr = locals().get("_atr_val")
+            _chart_tp = locals().get("tp_price")
+            _chart_sl = locals().get("sl_price")
 
-            # 진입가 / SL / TP 라인
-            if pos:
-                fig.add_hline(y=pos["entry_price"], line_dash="dot",
-                              line_color="white", annotation_text=f"진입 ${pos['entry_price']:,.0f}",
-                              row=1, col=1)
-                if _atr_val and _atr_val > 0:
-                    fig.add_hline(y=tp_price, line_dash="dash",
-                                  line_color="#26a69a", annotation_text=f"TP ${tp_price:,.0f}",
-                                  row=1, col=1)
-                    fig.add_hline(y=sl_price, line_dash="dash",
-                                  line_color="#ef5350", annotation_text=f"SL ${sl_price:,.0f}",
-                                  row=1, col=1)
+            tf_tabs = st.tabs(["1분봉", "5분봉", "15분봉", "일봉"])
+            tf_keys = ["1m", "5m", "15m", "1d"]
 
-            vol_colors = ["#ef5350" if c < o else "#26a69a"
-                          for c, o in zip(candles["close"], candles["open"])]
-            fig.add_trace(go.Bar(x=candles.index, y=candles["volume"],
-                marker_color=vol_colors, opacity=0.6, name="Volume"), row=2, col=1)
-
-            fig.update_layout(template="plotly_dark", height=400,
-                              xaxis_rangeslider_visible=False,
-                              margin=dict(l=0, r=0, t=10, b=0),
-                              legend=dict(orientation="h", y=1.02))
-            st.plotly_chart(fig, use_container_width=True)
+            for tab, tf_key in zip(tf_tabs, tf_keys):
+                with tab:
+                    cdf = tf_candles.get(tf_key, pd.DataFrame())
+                    if cdf.empty:
+                        st.caption(f"{tf_key} 데이터 없음")
+                        continue
+                    fig = _build_candlestick_chart(
+                        cdf, symbol, pos=pos,
+                        tp_price=_chart_tp, sl_price=_chart_sl,
+                        _atr_val=_chart_atr,
+                        show_trades=(tf_key in ("1m", "5m", "15m")),
+                        height=550,
+                    )
+                    st.plotly_chart(fig, use_container_width=True, key=f"chart_{symbol}_{tf_key}")
 
         st.divider()
 
@@ -416,6 +764,15 @@ if page == "실시간 현황":
         c4.metric("거래 수", f"{total_count}회")
         c5.metric("수익/손실", f"{win_count}W / {lose_count}L")
         st.dataframe(trades_df, use_container_width=True)
+
+    # ── 포지션 라이프사이클 (진입 → TP/SL) ──
+    st.subheader("포지션 라이프사이클")
+    st.caption("각 거래의 진입가, 목표가(TP), 손절가(SL), 실제 청산가를 시각화합니다.")
+    lc_fig = build_trade_lifecycle_chart(limit=12)
+    if lc_fig:
+        st.plotly_chart(lc_fig, use_container_width=True)
+    else:
+        st.info("SL/TP가 설정된 페이퍼 거래가 없습니다.")
 
     if auto_refresh:
         time.sleep(10)

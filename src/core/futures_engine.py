@@ -118,13 +118,20 @@ class FuturesEngine:
             if self._paper_trader is None:
                 self._paper_trader = PaperTrader()
 
-            candles = await self.client.get_candles(symbol, interval="1m", limit=300)
-            htf = await self.client.get_candles(symbol, interval="15m", limit=500)
-            if candles.empty:
+            candles_15m = await self.client.get_candles(symbol, interval="15m", limit=1000)
+            candles_1m = await self.client.get_candles(symbol, interval="1m", limit=500)
+            candles_5m = await self.client.get_candles(symbol, interval="5m", limit=500)
+            htf = await self.client.get_candles(symbol, interval="1h", limit=500)
+            if candles_15m.empty:
                 return
 
+            # 보조 타임프레임을 attrs로 부착
+            candles_15m.attrs["candles_1m"] = candles_1m
+            candles_15m.attrs["candles_5m"] = candles_5m
+            candles_15m.attrs["candles_15m"] = candles_15m
+
             await self._paper_trader.tick(
-                {symbol: candles}, {symbol: htf})
+                {symbol: candles_15m}, {symbol: htf})
         except Exception:
             logger.exception("paper.run_failed", symbol=symbol)
 
@@ -227,10 +234,18 @@ class FuturesEngine:
     # ═══════════════════════════════════════════════════════
 
     async def _fetch_candles(self, symbol: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """1분봉 3000개(50시간) + 15분봉 500개(5일) 조회."""
-        candles_1m = await self.client.get_candles(symbol, interval="1m", limit=3000)
-        htf_candles = await self.client.get_candles(symbol, interval="15m", limit=500)
-        return candles_1m, htf_candles
+        """15분봉(메인) + 1분봉/5분봉(보조) + 1시간봉(HTF) 조회."""
+        candles_15m = await self.client.get_candles(symbol, interval="15m", limit=1000)
+        candles_1m = await self.client.get_candles(symbol, interval="1m", limit=500)
+        candles_5m = await self.client.get_candles(symbol, interval="5m", limit=500)
+        htf_candles = await self.client.get_candles(symbol, interval="1h", limit=500)
+
+        # 보조 타임프레임을 attrs로 부착
+        if not candles_15m.empty:
+            candles_15m.attrs["candles_1m"] = candles_1m
+            candles_15m.attrs["candles_5m"] = candles_5m
+            candles_15m.attrs["candles_15m"] = candles_15m
+        return candles_15m, htf_candles
 
     async def _tick_always_flip(self, symbol: str, strategy: Strategy) -> None:
         candles, htf = await self._fetch_candles(symbol)

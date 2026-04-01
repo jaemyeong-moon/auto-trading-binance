@@ -18,9 +18,9 @@ def _load_yaml_config() -> dict[str, Any]:
 
     config: dict[str, Any] = {}
     if base.exists():
-        config = yaml.safe_load(base.read_text()) or {}
+        config = yaml.safe_load(base.read_text(encoding="utf-8")) or {}
     if local.exists():
-        local_config = yaml.safe_load(local.read_text()) or {}
+        local_config = yaml.safe_load(local.read_text(encoding="utf-8")) or {}
         config = _deep_merge(config, local_config)
     return config
 

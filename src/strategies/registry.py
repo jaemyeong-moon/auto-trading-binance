@@ -42,6 +42,7 @@ def _register_all():
     from src.strategies import aggressive_scalper  # noqa: F401
     from src.strategies import contrarian_scalper  # noqa: F401
     from src.strategies import data_driven_scalper  # noqa: F401
+    from src.strategies import pattern_scalper  # noqa: F401
 
 
 _register_all()
