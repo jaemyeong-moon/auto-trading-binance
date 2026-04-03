@@ -121,6 +121,16 @@ async def api_status(request: Request):
         data = await _fetch_live()
         bot_states = db.get_all_bot_states()
         settings = db.get_all_settings()
+
+        # DB 포지션의 SL/TP를 거래소 포지션에 병합
+        with db.get_session() as session:
+            db_positions = {p.symbol: p for p in session.query(db.PositionRecord).all()}
+        for sym, info in data["positions"].items():
+            db_pos = db_positions.get(sym)
+            if db_pos and info.get("position"):
+                info["position"]["sl_price"] = db_pos.sl_price
+                info["position"]["tp_price"] = db_pos.tp_price
+
         return JSONResponse({
             "ok": True,
             "account": data["account"],
@@ -615,33 +625,19 @@ body {
   </div>
   <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-      <div class="card-title" style="margin:0;">차트</div>
-      <div style="display:flex;gap:4px;align-items:center;">
-        <select id="chartMode" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 6px;font-size:11px;">
-          <option value="tv" selected>바이낸스</option>
-          <option value="lw">거래마커</option>
-        </select>
-        <select id="chartSymbol" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px;">
-          <option value="BTCUSDT">BTC</option>
-          <option value="ETHUSDT">ETH</option>
-          <option value="BNBUSDT">BNB</option>
-          <option value="SOLUSDT">SOL</option>
-          <option value="XRPUSDT">XRP</option>
-        </select>
-      </div>
+      <div class="card-title" style="margin:0;">실시간 차트</div>
+      <select id="chartSymbol" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px;">
+        <option value="BTCUSDT">BTC</option>
+        <option value="ETHUSDT">ETH</option>
+        <option value="BNBUSDT">BNB</option>
+        <option value="SOLUSDT">SOL</option>
+        <option value="XRPUSDT">XRP</option>
+      </select>
     </div>
-    <!-- TradingView 차트 (바이낸스 전체 기간) -->
-    <div id="tvChartWrap" style="width:100%;height:400px;border-radius:8px;overflow:hidden;"></div>
-    <!-- Lightweight Charts (거래 마커 오버레이) -->
-    <div id="chartContainer" style="width:100%;height:300px;border-radius:8px;overflow:hidden;display:none;"></div>
-  </div>
-  <!-- 포지션 라이프사이클 -->
-  <div class="card" id="tradeMarkersCard">
-    <div class="card-title">거래 마커</div>
-    <div id="tradeMarkersList" style="font-size:12px;"></div>
+    <div id="chartContainer" style="width:100%;height:350px;border-radius:8px;overflow:hidden;"></div>
   </div>
   <div class="card">
-    <div class="card-title">최근 거래</div>
+    <div class="card-title">실거래 내역</div>
     <div id="recentTrades"><div class="loading"><div class="spinner"></div></div></div>
   </div>
 </div>
@@ -664,7 +660,7 @@ body {
 
 <div class="page" id="page-trades">
   <div class="card">
-    <div class="card-title">거래 요약</div>
+    <div class="card-title">가상매매 요약</div>
     <div class="metrics" id="tradeSummary"></div>
   </div>
   <div class="card">
@@ -682,7 +678,7 @@ body {
     <div id="tradeChartContainer" style="width:100%;height:300px;border-radius:8px;overflow:hidden;display:none;"></div>
   </div>
   <div class="card">
-    <div class="card-title">거래 내역</div>
+    <div class="card-title">가상매매 내역</div>
     <div id="tradeList"><div class="loading"><div class="spinner"></div></div></div>
   </div>
 </div>
@@ -738,7 +734,7 @@ body {
     <span class="icon">🤖</span>봇
   </button>
   <button onclick="showPage('trades',this)">
-    <span class="icon">📋</span>거래
+    <span class="icon">📋</span>가상매매
   </button>
   <button onclick="showPage('settings',this)">
     <span class="icon">⚙️</span>설정
@@ -878,25 +874,28 @@ function renderStatus(d) {
     </div>
   `;
 
-  // Chart — 기본 TradingView 모드
-  switchChartMode();
+  // Chart — 현황 탭은 lightweight-charts + 실거래 포지션 마커
+  loadChart();
 }
 
 async function loadRecentTrades() {
   try {
-  const r = await authFetch('/api/trades?limit=5');
+  const r = await authFetch('/api/trades?limit=20');
   if (!r) return;
   const trades = await r.json();
   if (!trades.length) {
     document.getElementById('recentTrades').innerHTML =
-      '<div style="text-align:center;padding:16px;color:var(--dim)">거래 없음</div>';
+      '<div style="text-align:center;padding:16px;color:var(--dim)">실거래 내역 없음</div>';
     return;
   }
   document.getElementById('recentTrades').innerHTML = trades.map(t => `
-    <div class="trade-item">
+    <div class="trade-item" onclick="openTradeChart(${t.id},'real')" style="cursor:pointer;">
       <div class="trade-info">
-        <div class="trade-sym">${t.symbol.replace('USDT','')} <span class="pos-side ${t.side==='BUY'||t.side==='LONG'?'long':'short'}" style="font-size:10px">${t.side}</span></div>
-        <div class="trade-meta">${t.strategy || ''} · ${t.closed_at ? new Date(t.closed_at).toLocaleString('ko',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : ''}</div>
+        <div class="trade-sym">${t.symbol.replace('USDT','')} <span class="pos-side ${t.side==='BUY'||t.side==='LONG'?'long':'short'}" style="font-size:10px">${t.side}</span>
+          ${t.reason ? '<span style="font-size:10px;color:var(--dim);margin-left:4px;">'+t.reason+'</span>' : ''}
+        </div>
+        <div class="trade-meta">${fmt(t.entry)} → ${fmt(t.exit)} · ${t.strategy || ''}</div>
+        <div class="trade-meta">${t.closed_at ? new Date(t.closed_at).toLocaleString('ko') : ''}</div>
       </div>
       <div>
         <div class="trade-pnl ${cls(t.net_pnl)}">${fmt(t.net_pnl)}</div>
@@ -934,20 +933,21 @@ async function toggleBot(symbol, start) {
 
 // ─── Trades ──────────────────────────────────
 async function loadTrades() {
-  const r = await authFetch('/api/trades?limit=50');
+  // 가상매매 (5개 전략) 거래 내역
+  const r = await authFetch('/api/paper/trades?limit=100');
   if (!r) return;
   const trades = await r.json();
 
   if (!trades.length) {
     document.getElementById('tradeSummary').innerHTML = '';
     document.getElementById('tradeList').innerHTML =
-      '<div style="text-align:center;padding:16px;color:var(--dim)">거래 없음</div>';
+      '<div style="text-align:center;padding:16px;color:var(--dim)">가상매매 거래 없음</div>';
     return;
   }
 
-  const totalNet = trades.reduce((s,t)=>s+t.net_pnl,0);
+  const totalNet = trades.reduce((s,t)=>s+t.pnl,0);
   const totalFee = trades.reduce((s,t)=>s+t.fee,0);
-  const wins = trades.filter(t=>t.net_pnl>0).length;
+  const wins = trades.filter(t=>t.pnl>0).length;
   const winRate = (wins/trades.length*100);
 
   document.getElementById('tradeSummary').innerHTML = `
@@ -958,17 +958,17 @@ async function loadTrades() {
   `;
 
   document.getElementById('tradeList').innerHTML = trades.map(t => `
-    <div class="trade-item" onclick="openTradeChart(${t.id},'real')" style="cursor:pointer;">
+    <div class="trade-item" onclick="openTradeChart(${t.id},'paper')" style="cursor:pointer;">
       <div class="trade-info">
         <div class="trade-sym">${t.symbol.replace('USDT','')} <span class="pos-side ${t.side==='BUY'||t.side==='LONG'?'long':'short'}" style="font-size:10px">${t.side}</span>
+          <span style="font-size:10px;color:var(--accent);margin-left:4px;">${t.strategy.replace('_scalper','')}</span>
           ${t.reason ? '<span style="font-size:10px;color:var(--dim);margin-left:4px;">'+t.reason+'</span>' : ''}
         </div>
-        <div class="trade-meta">${fmt(t.entry)} → ${fmt(t.exit)} · ${t.strategy || ''}</div>
+        <div class="trade-meta">${fmt(t.entry)} → ${fmt(t.exit)}</div>
         <div class="trade-meta">${t.closed_at ? new Date(t.closed_at).toLocaleString('ko') : ''}</div>
       </div>
       <div>
-        <div class="trade-pnl ${cls(t.net_pnl)}">${fmt(t.net_pnl)}</div>
-        <div class="trade-pnl-pct ${cls(t.pnl_pct)}">${pct(t.pnl_pct)}</div>
+        <div class="trade-pnl ${cls(t.pnl)}">${fmt(t.pnl)}</div>
       </div>
     </div>
   `).join('');
@@ -1129,22 +1129,7 @@ async function loadTradeMarkers(sym) {
 
 // 차트 모드 전환
 function switchChartMode() {
-  const mode = document.getElementById('chartMode').value;
-  const tvWrap = document.getElementById('tvChartWrap');
-  const lwWrap = document.getElementById('chartContainer');
-  const mkCard = document.getElementById('tradeMarkersCard');
-  if (mode === 'tv') {
-    tvWrap.style.display = 'block';
-    lwWrap.style.display = 'none';
-    mkCard.style.display = 'block';
-    loadTvChart('tvChartWrap');
-    loadTradeMarkers();
-  } else {
-    tvWrap.style.display = 'none';
-    lwWrap.style.display = 'block';
-    mkCard.style.display = 'none';
-    loadChart();
-  }
+  loadChart();
 }
 
 // ─── Lightweight Chart (거래 마커 오버레이) ────
@@ -1199,50 +1184,71 @@ async function loadChart() {
       color: c.close >= c.open ? 'rgba(38,166,154,0.3)' : 'rgba(239,83,80,0.3)',
     })));
 
-    // Buy/Sell 마커 (페이퍼 트레이드)
-    markers = [];
-    (d.trades || []).forEach(t => {
-      if (t.time) {
-        markers.push({
-          time: t.time,
-          position: t.side === 'LONG' ? 'belowBar' : 'aboveBar',
-          color: t.side === 'LONG' ? '#26a69a' : '#ef5350',
-          shape: t.side === 'LONG' ? 'arrowUp' : 'arrowDown',
-          text: `${t.strategy.substring(0,4)} ${t.side}`,
+    // 실거래 현재 포지션 → 진입가/SL/TP 수평선
+    if (statusCache && statusCache.positions && statusCache.positions[sym]) {
+      const info = statusCache.positions[sym];
+      const pos = info.position;
+      if (pos && pos.entry_price > 0) {
+        candleSeries.createPriceLine({
+          price: pos.entry_price, color: '#ffd54f', lineWidth: 2,
+          lineStyle: LightweightCharts.LineStyle.Solid,
+          axisLabelVisible: true, title: `Entry ${pos.side}`,
         });
+        if (pos.sl_price && pos.sl_price > 0) {
+          candleSeries.createPriceLine({
+            price: pos.sl_price, color: '#ef5350', lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dashed,
+            axisLabelVisible: true, title: 'SL',
+          });
+        }
+        if (pos.tp_price && pos.tp_price > 0) {
+          candleSeries.createPriceLine({
+            price: pos.tp_price, color: '#26a69a', lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dashed,
+            axisLabelVisible: true, title: 'TP',
+          });
+        }
       }
-      if (t.exit_time) {
-        markers.push({
-          time: t.exit_time,
-          position: 'inBar',
-          color: t.pnl >= 0 ? '#26a69a' : '#ef5350',
-          shape: 'circle',
-          text: `${t.reason} $${t.pnl.toFixed(2)}`,
+    }
+
+    // 실거래 최근 체결 마커
+    try {
+      const tr = await authFetch(`/api/trades?symbol=${sym}&limit=20`);
+      if (tr) {
+        const trades = await tr.json();
+        markers = [];
+        trades.forEach(t => {
+          if (t.opened_at) {
+            const ts = Math.floor(new Date(t.opened_at).getTime() / 1000);
+            const isLong = t.side === 'LONG' || t.side === 'BUY';
+            markers.push({
+              time: ts, position: isLong ? 'belowBar' : 'aboveBar',
+              color: isLong ? '#26a69a' : '#ef5350',
+              shape: isLong ? 'arrowUp' : 'arrowDown',
+              text: t.side,
+            });
+          }
+          if (t.closed_at) {
+            const ts = Math.floor(new Date(t.closed_at).getTime() / 1000);
+            markers.push({
+              time: ts, position: 'inBar',
+              color: t.net_pnl >= 0 ? '#26a69a' : '#ef5350',
+              shape: 'circle',
+              text: `${t.reason||'close'} ${fmt(t.net_pnl)}`,
+            });
+          }
         });
+        markers.sort((a,b) => a.time - b.time);
+        if (markers.length) candleSeries.setMarkers(markers);
       }
-    });
-    // 열린 포지션 마커
-    (d.positions || []).forEach(p => {
-      if (p.time) {
-        markers.push({
-          time: p.time,
-          position: p.side === 'LONG' ? 'belowBar' : 'aboveBar',
-          color: '#ffa726',
-          shape: p.side === 'LONG' ? 'arrowUp' : 'arrowDown',
-          text: `OPEN ${p.side}`,
-        });
-      }
-    });
-    markers.sort((a,b) => a.time - b.time);
-    if (markers.length) candleSeries.setMarkers(markers);
+    } catch(e) {}
 
     chart.timeScale().fitContent();
   } catch(e) { console.error('loadChart:', e); }
 }
 
-// 심볼/모드 변경 시 차트 리로드
-document.getElementById('chartSymbol').addEventListener('change', switchChartMode);
-document.getElementById('chartMode').addEventListener('change', switchChartMode);
+// 심볼 변경 시 차트 리로드
+document.getElementById('chartSymbol').addEventListener('change', () => loadChart());
 
 // ─── Trade Chart (거래 현황 페이지) — TradingView ──────────
 function loadTradeChart() {
