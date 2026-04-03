@@ -577,11 +577,6 @@ body {
     <div class="card-title">현재 설정</div>
     <div id="settingSummary"></div>
   </div>
-  <div class="card">
-    <div class="card-title">가상매매 상태</div>
-    <div style="font-size:12px;color:var(--dim);margin-bottom:8px;">봇 실행 시 모든 전략이 $200 가상자본으로 자동 매매됩니다</div>
-    <div id="paperSummaryBots"><div class="loading"><div class="spinner"></div></div></div>
-  </div>
 </div>
 
 <div class="page" id="page-trades">
@@ -609,16 +604,6 @@ body {
   </div>
 </div>
 
-<div class="page" id="page-paper">
-  <div class="card">
-    <div class="card-title">가상매매 현황</div>
-    <div id="paperList"><div class="loading"><div class="spinner"></div></div></div>
-  </div>
-  <div class="card">
-    <div class="card-title">가상매매 거래내역</div>
-    <div id="paperTradeList"><div class="loading"><div class="spinner"></div></div></div>
-  </div>
-</div>
 
 <div class="page" id="page-settings">
   <div class="card">
@@ -671,9 +656,6 @@ body {
   </button>
   <button onclick="showPage('trades',this)">
     <span class="icon">📋</span>거래
-  </button>
-  <button onclick="showPage('paper',this)">
-    <span class="icon">🧪</span>가상매매
   </button>
   <button onclick="showPage('settings',this)">
     <span class="icon">⚙️</span>설정
@@ -802,9 +784,6 @@ function renderStatus(d) {
       분석주기: <b>${s.tick_interval}초</b>
     </div>
   `;
-
-  // Paper summary on bots page
-  loadPaperSummaryBots();
 
   // Chart — 기본 TradingView 모드
   switchChartMode();

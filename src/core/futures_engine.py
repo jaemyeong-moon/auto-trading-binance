@@ -331,16 +331,6 @@ class FuturesEngine:
                 return
 
         if signal.type in (SignalType.BUY, SignalType.SELL) and not pos:
-            # optimizer 점수가 0이면 신규 진입 차단 (돈 태우는 심볼 보호)
-            opt_score = db.get_setting_float(f"opt_score_{symbol}")
-            if opt_score <= 0:
-                # DB에 심볼별 점수 없으면 글로벌 점수 확인
-                opt_score = db.get_setting_float("auto_opt_score")
-            if opt_score <= 0:
-                logger.info("engine.skip_entry", symbol=symbol,
-                             reason="optimizer_score_zero")
-                return
-
             # 신호 confidence가 낮으면 진입 차단
             if signal.confidence < 0.6:
                 logger.info("engine.skip_entry", symbol=symbol,
