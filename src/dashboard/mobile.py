@@ -152,6 +152,10 @@ async def api_trades(request: Request, symbol: str | None = None, limit: int = 5
         "net_pnl": round(t.net_pnl if t.net_pnl is not None else (t.pnl or 0), 2),
         "pnl_pct": round(t.pnl_pct or 0, 2),
         "strategy": t.strategy or "",
+        "reason": getattr(t, "reason", "") or "",
+        "sl_price": getattr(t, "sl_price", None),
+        "tp_price": getattr(t, "tp_price", None),
+        "opened_at": t.opened_at.isoformat() if t.opened_at else "",
         "closed_at": t.closed_at.isoformat() if t.closed_at else "",
     } for t in trades])
 
@@ -278,6 +282,85 @@ async def api_settings_save(request: Request):
     for key, value in body.items():
         db.set_setting(key, str(value))
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/trade/{trade_id}/chart")
+async def api_trade_chart(request: Request, trade_id: int, source: str = "real"):
+    """포지션 진입→청산 구간의 캔들 + SL/TP + 진입/청산 마커."""
+    if err := _auth_guard(request): return err
+    try:
+        with db.get_session() as session:
+            if source == "paper":
+                trade = session.query(db.PaperTrade).get(trade_id)
+            else:
+                trade = session.query(db.TradeRecord).get(trade_id)
+            if not trade:
+                return JSONResponse({"error": "trade not found"}, status_code=404)
+
+            info = {
+                "symbol": trade.symbol, "side": trade.side,
+                "entry_price": trade.entry_price,
+                "exit_price": trade.exit_price,
+                "sl_price": getattr(trade, "sl_price", None),
+                "tp_price": getattr(trade, "tp_price", None),
+                "pnl": round(getattr(trade, "net_pnl", None) or getattr(trade, "pnl", 0) or 0, 4),
+                "reason": getattr(trade, "reason", "") or "",
+                "opened_at": trade.opened_at.isoformat() if trade.opened_at else None,
+                "closed_at": trade.closed_at.isoformat() if trade.closed_at else None,
+            }
+
+        # 구간 캔들 조회 (opened_at ~ closed_at + 여유)
+        if not info["opened_at"] or not info["closed_at"]:
+            return JSONResponse({"trade": info, "candles": []})
+
+        from datetime import datetime, timedelta
+        opened = datetime.fromisoformat(info["opened_at"])
+        closed = datetime.fromisoformat(info["closed_at"])
+        duration = (closed - opened).total_seconds()
+
+        # 캔들 간격: 포지션 보유 시간에 따라 자동 선택
+        if duration < 3600:          # < 1h → 1m 캔들
+            interval, limit = "1m", min(int(duration / 60) + 20, 500)
+        elif duration < 86400:       # < 24h → 5m 캔들
+            interval, limit = "5m", min(int(duration / 300) + 20, 500)
+        else:                        # >= 24h → 15m 캔들
+            interval, limit = "15m", min(int(duration / 900) + 20, 500)
+
+        # 시작 시간 여유 (앞뒤 10% 추가)
+        margin = timedelta(seconds=duration * 0.1 + 60)
+        start_ms = int((opened - margin).timestamp() * 1000)
+
+        client = FuturesClient()
+        await client.connect()
+        try:
+            candles = await client.get_candles(
+                info["symbol"], interval=interval, limit=limit,
+            )
+        finally:
+            await client.disconnect()
+
+        if candles.empty:
+            return JSONResponse({"trade": info, "candles": []})
+
+        # 시간 범위 필터링
+        candle_data = []
+        end_ts = (closed + margin).timestamp()
+        start_ts = (opened - margin).timestamp()
+        for idx, row in candles.iterrows():
+            ts = row.name.timestamp() if hasattr(row.name, 'timestamp') else float(idx)
+            if start_ts <= ts <= end_ts:
+                candle_data.append({
+                    "time": int(ts),
+                    "open": float(row["open"]), "high": float(row["high"]),
+                    "low": float(row["low"]), "close": float(row["close"]),
+                    "volume": float(row["volume"]),
+                })
+
+        return JSONResponse({"trade": info, "candles": candle_data})
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 # ─── Mobile HTML SPA ──────────────────────────────────────
@@ -662,6 +745,16 @@ body {
   </button>
 </div>
 
+<!-- 포지션 차트 모달 -->
+<div id="tradeChartModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:1000;background:var(--bg);">
+  <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border);">
+    <div id="tradeChartTitle" style="font-weight:700;font-size:14px;"></div>
+    <button onclick="closeTradeChart()" style="background:none;border:none;color:var(--text);font-size:20px;cursor:pointer;padding:4px 8px;">✕</button>
+  </div>
+  <div id="tradeChartInfo" style="padding:8px 16px;font-size:12px;color:var(--dim);"></div>
+  <div id="tradeChartArea" style="width:100%;height:calc(100vh - 120px);"></div>
+</div>
+
 <script>
 // ─── Auth helpers ────────────────────────────
 async function authFetch(url, opts={}) {
@@ -865,9 +958,11 @@ async function loadTrades() {
   `;
 
   document.getElementById('tradeList').innerHTML = trades.map(t => `
-    <div class="trade-item">
+    <div class="trade-item" onclick="openTradeChart(${t.id},'real')" style="cursor:pointer;">
       <div class="trade-info">
-        <div class="trade-sym">${t.symbol.replace('USDT','')} <span class="pos-side ${t.side==='BUY'||t.side==='LONG'?'long':'short'}" style="font-size:10px">${t.side}</span></div>
+        <div class="trade-sym">${t.symbol.replace('USDT','')} <span class="pos-side ${t.side==='BUY'||t.side==='LONG'?'long':'short'}" style="font-size:10px">${t.side}</span>
+          ${t.reason ? '<span style="font-size:10px;color:var(--dim);margin-left:4px;">'+t.reason+'</span>' : ''}
+        </div>
         <div class="trade-meta">${fmt(t.entry)} → ${fmt(t.exit)} · ${t.strategy || ''}</div>
         <div class="trade-meta">${t.closed_at ? new Date(t.closed_at).toLocaleString('ko') : ''}</div>
       </div>
@@ -1235,6 +1330,121 @@ async function saveSettings() {
   await authFetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
   alert('설정 저장 완료. 전략 변경 시 봇을 재시작하세요.');
   loadStatus();
+}
+
+// ─── Position Chart Modal ────────────────────
+let _tradeChart = null;
+
+function closeTradeChart() {
+  document.getElementById('tradeChartModal').style.display = 'none';
+  if (_tradeChart) { _tradeChart.remove(); _tradeChart = null; }
+}
+
+async function openTradeChart(tradeId, source='real') {
+  const modal = document.getElementById('tradeChartModal');
+  const area = document.getElementById('tradeChartArea');
+  const titleEl = document.getElementById('tradeChartTitle');
+  const infoEl = document.getElementById('tradeChartInfo');
+
+  modal.style.display = 'block';
+  area.innerHTML = '<div style="text-align:center;padding:40px;color:var(--dim)">로딩 중...</div>';
+  titleEl.textContent = '';
+  infoEl.textContent = '';
+
+  try {
+    const r = await authFetch(`/api/trade/${tradeId}/chart?source=${source}`);
+    if (!r) return;
+    const data = await r.json();
+    if (data.error) { area.innerHTML = `<div style="text-align:center;padding:40px;color:#f44">${data.error}</div>`; return; }
+    if (!data.candles || !data.candles.length) { area.innerHTML = '<div style="text-align:center;padding:40px;color:var(--dim)">캔들 데이터 없음</div>'; return; }
+
+    const t = data.trade;
+    const isLong = t.side === 'LONG' || t.side === 'BUY';
+    const pnlCls = t.pnl >= 0 ? 'up' : 'down';
+    titleEl.innerHTML = `${t.symbol.replace('USDT','')} <span class="pos-side ${isLong?'long':'short'}" style="font-size:11px">${t.side}</span>`;
+    infoEl.innerHTML = `${fmt(t.entry_price)} → ${fmt(t.exit_price)} · <span class="${pnlCls}">${fmt(t.pnl)}</span> · ${t.reason || ''}`;
+
+    // 차트 생성
+    area.innerHTML = '';
+    if (_tradeChart) _tradeChart.remove();
+    const isDark = true;
+    _tradeChart = LightweightCharts.createChart(area, {
+      width: area.clientWidth, height: area.clientHeight,
+      layout: { background: { color: '#1a1a2e' }, textColor: '#aaa' },
+      grid: { vertLines: { color: '#2a2a3e' }, horzLines: { color: '#2a2a3e' } },
+      crosshair: { mode: 0 },
+      timeScale: { timeVisible: true, secondsVisible: false },
+    });
+
+    const candleSeries = _tradeChart.addCandlestickSeries({
+      upColor: '#26a69a', downColor: '#ef5350',
+      borderUpColor: '#26a69a', borderDownColor: '#ef5350',
+      wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+    });
+    candleSeries.setData(data.candles);
+
+    // SL 수평선 (빨간 점선)
+    if (t.sl_price) {
+      candleSeries.createPriceLine({
+        price: t.sl_price, color: '#ef5350', lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true, title: 'SL',
+      });
+    }
+    // TP 수평선 (초록 점선)
+    if (t.tp_price) {
+      candleSeries.createPriceLine({
+        price: t.tp_price, color: '#26a69a', lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true, title: 'TP',
+      });
+    }
+    // 진입가 수평선 (노란 실선)
+    candleSeries.createPriceLine({
+      price: t.entry_price, color: '#ffd54f', lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Solid,
+      axisLabelVisible: true, title: 'Entry',
+    });
+    // 청산가 수평선 (흰색 점선)
+    if (t.exit_price) {
+      candleSeries.createPriceLine({
+        price: t.exit_price, color: '#ffffff88', lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted,
+        axisLabelVisible: true, title: 'Exit',
+      });
+    }
+
+    // 마커: 진입 & 청산
+    const markers = [];
+    if (t.opened_at) {
+      const openTs = Math.floor(new Date(t.opened_at).getTime() / 1000);
+      markers.push({
+        time: openTs, position: isLong ? 'belowBar' : 'aboveBar',
+        color: isLong ? '#26a69a' : '#ef5350',
+        shape: isLong ? 'arrowUp' : 'arrowDown',
+        text: isLong ? 'LONG' : 'SHORT',
+      });
+    }
+    if (t.closed_at && t.exit_price) {
+      const closeTs = Math.floor(new Date(t.closed_at).getTime() / 1000);
+      markers.push({
+        time: closeTs, position: isLong ? 'aboveBar' : 'belowBar',
+        color: '#ffd54f', shape: 'circle',
+        text: (t.reason || 'close').toUpperCase(),
+      });
+    }
+    if (markers.length) candleSeries.setMarkers(markers.sort((a,b) => a.time - b.time));
+
+    _tradeChart.timeScale().fitContent();
+
+    // 리사이즈 대응
+    const ro = new ResizeObserver(() => {
+      if (_tradeChart) _tradeChart.applyOptions({ width: area.clientWidth, height: area.clientHeight });
+    });
+    ro.observe(area);
+  } catch(e) {
+    area.innerHTML = `<div style="text-align:center;padding:40px;color:#f44">${e.message}</div>`;
+  }
 }
 
 // ─── Auto refresh ────────────────────────────

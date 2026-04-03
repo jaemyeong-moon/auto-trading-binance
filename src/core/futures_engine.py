@@ -545,9 +545,12 @@ class FuturesEngine:
                                  symbol=symbol, direction=direction)
             return
 
+        # SL/TP 가격 계산 + DB 저장 + 거래소 주문
+        sl_price, tp_price = self._calc_sl_tp(direction, price, strategy)
         db.open_position(
             symbol=symbol, side=direction, entry_price=price,
             quantity=quantity, strategy=db.get_setting("strategy"),
+            sl_price=sl_price, tp_price=tp_price,
         )
         logger.info("engine.position_opened", symbol=symbol, direction=direction,
                      qty=quantity, invest=f"${invest:.2f}",
@@ -580,7 +583,7 @@ class FuturesEngine:
             return 0.0
         current_price = await self.client.get_price(symbol)
         fee = await self.client.get_recent_fees(symbol)
-        trade = db.close_position(symbol, exit_price=current_price, fee=fee)
+        trade = db.close_position(symbol, exit_price=current_price, fee=fee, reason=reason)
         pnl = trade.pnl if trade else 0.0
         net_pnl = trade.net_pnl if trade else 0.0
 
@@ -594,39 +597,38 @@ class FuturesEngine:
 
         return pnl
 
+    def _calc_sl_tp(
+        self, direction: str, entry_price: float, strategy: Strategy,
+    ) -> tuple[float, float]:
+        """SL/TP 가격 계산. (sl_price, tp_price) 반환."""
+        state = getattr(strategy, "state", None)
+
+        if state and hasattr(state, "sl_price") and getattr(state, "sl_price", 0) > 0:
+            return state.sl_price, state.tp_price
+
+        entry_atr = getattr(state, "entry_atr", 0) if state else 0
+        sl_mult = getattr(strategy, "SL_ATR_MULT", 6.0)
+        tp_mult = getattr(strategy, "TP_ATR_MULT", 10.0)
+
+        if entry_atr > 0 and sl_mult < 50:
+            sl_dist = entry_atr * sl_mult
+            tp_dist = entry_atr * tp_mult
+        else:
+            sl_pct = db.get_setting_float("sl_pct") or 0.005
+            tp_pct = db.get_setting_float("tp_pct") or 0.01
+            sl_dist = entry_price * sl_pct
+            tp_dist = entry_price * tp_pct
+
+        if direction == "LONG":
+            return entry_price - sl_dist, entry_price + tp_dist
+        return entry_price + sl_dist, entry_price - tp_dist
+
     async def _place_exchange_sl_tp(
         self, symbol: str, direction: str, entry_price: float, strategy: Strategy,
     ) -> None:
-        """진입 후 거래소에 SL/TP 주문. 전략 자체 SL/TP 우선 사용."""
+        """진입 후 거래소에 SL/TP 주문. _calc_sl_tp 재사용."""
         try:
-            state = getattr(strategy, "state", None)
-
-            # 전략이 자체 SL/TP를 관리하는 경우 (v9, v10 등)
-            if state and hasattr(state, "sl_price") and state.sl_price > 0:
-                sl_price = state.sl_price
-                tp_price = state.tp_price
-            else:
-                # 엔진 ATR 기반 또는 고정 %
-                entry_atr = getattr(state, "entry_atr", 0) if state else 0
-                sl_mult = getattr(strategy, "SL_ATR_MULT", 6.0)
-                tp_mult = getattr(strategy, "TP_ATR_MULT", 10.0)
-
-                if entry_atr > 0 and sl_mult < 50:  # 99.0은 비활성화 표시
-                    sl_dist = entry_atr * sl_mult
-                    tp_dist = entry_atr * tp_mult
-                else:
-                    sl_pct = db.get_setting_float("sl_pct") or 0.005
-                    tp_pct = db.get_setting_float("tp_pct") or 0.01
-                    sl_dist = entry_price * sl_pct
-                    tp_dist = entry_price * tp_pct
-
-                if direction == "LONG":
-                    sl_price = entry_price - sl_dist
-                    tp_price = entry_price + tp_dist
-                else:
-                    sl_price = entry_price + sl_dist
-                    tp_price = entry_price - tp_dist
-
+            sl_price, tp_price = self._calc_sl_tp(direction, entry_price, strategy)
             pos = await self.client.get_position(symbol)
             qty = pos["quantity"] if pos else 0
 

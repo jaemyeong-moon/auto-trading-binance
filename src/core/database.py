@@ -47,6 +47,9 @@ class TradeRecord(Base):
     fee = Column(Float, nullable=True)          # 왕복 수수료 (USDT)
     net_pnl = Column(Float, nullable=True)      # 순수익 (pnl - fee)
     strategy = Column(String, nullable=True)
+    reason = Column(String, nullable=True)          # 청산 사유 (take_profit, stop_loss, flip, signal 등)
+    sl_price = Column(Float, nullable=True)         # 손절 가격
+    tp_price = Column(Float, nullable=True)         # 익절 가격
     opened_at = Column(DateTime, default=now_kst)
     closed_at = Column(DateTime, nullable=True)
 
@@ -60,6 +63,8 @@ class PositionRecord(Base):
     entry_price = Column(Float, nullable=False)
     quantity = Column(Float, nullable=False)
     strategy = Column(String, nullable=True)
+    sl_price = Column(Float, nullable=True)         # 손절 가격
+    tp_price = Column(Float, nullable=True)         # 익절 가격
     opened_at = Column(DateTime, default=now_kst)
 
 
@@ -141,6 +146,29 @@ SessionLocal = sessionmaker(bind=engine)
 
 def init_db() -> None:
     Base.metadata.create_all(engine)
+    _migrate_add_columns()
+
+
+def _migrate_add_columns() -> None:
+    """기존 DB에 새 컬럼이 없으면 ALTER TABLE로 추가 (SQLite 호환)."""
+    migrations = [
+        ("trades", "sl_price", "REAL"),
+        ("trades", "tp_price", "REAL"),
+        ("trades", "reason", "TEXT"),
+        ("positions", "sl_price", "REAL"),
+        ("positions", "tp_price", "REAL"),
+    ]
+    with engine.connect() as conn:
+        for table, col, col_type in migrations:
+            try:
+                conn.execute(
+                    __import__("sqlalchemy").text(
+                        f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"
+                    )
+                )
+            except Exception:
+                pass  # 이미 존재하면 무시
+        conn.commit()
 
 
 def get_session() -> Session:
@@ -150,19 +178,23 @@ def get_session() -> Session:
 # ─── Position helpers ──────────────────────────────────────
 
 def open_position(
-    symbol: str, side: str, entry_price: float, quantity: float, strategy: str = ""
+    symbol: str, side: str, entry_price: float, quantity: float,
+    strategy: str = "", sl_price: float = 0, tp_price: float = 0,
 ) -> PositionRecord:
     with get_session() as session:
         pos = PositionRecord(
             symbol=symbol, side=side, entry_price=entry_price,
             quantity=quantity, strategy=strategy,
+            sl_price=sl_price or None, tp_price=tp_price or None,
         )
         session.merge(pos)  # upsert by symbol
         session.commit()
     return pos
 
 
-def close_position(symbol: str, exit_price: float, fee: float = 0) -> TradeRecord | None:
+def close_position(
+    symbol: str, exit_price: float, fee: float = 0, reason: str = "",
+) -> TradeRecord | None:
     with get_session() as session:
         pos = session.query(PositionRecord).filter_by(symbol=symbol).first()
         if not pos:
@@ -178,7 +210,9 @@ def close_position(symbol: str, exit_price: float, fee: float = 0) -> TradeRecor
             symbol=symbol, side=pos.side, entry_price=pos.entry_price,
             exit_price=exit_price, quantity=pos.quantity,
             pnl=pnl, pnl_pct=pnl_pct, fee=round(fee, 4), net_pnl=round(net_pnl, 4),
-            strategy=pos.strategy, closed_at=now_kst(),
+            strategy=pos.strategy, reason=reason or None,
+            sl_price=pos.sl_price, tp_price=pos.tp_price,
+            closed_at=now_kst(),
         )
         session.add(trade)
         session.delete(pos)

@@ -59,6 +59,15 @@
 | 5.9.2 | PaperTrader 실행 빈도를 매 틱으로 변경 (5틱→1틱) | 실거래와 동일한 타이밍에 평가 | 5.9.1 | cc:TODO |
 | 5.9.3 | PaperTrader에 auto-optimizer 결과 반영 — 동적 SL/TP 배수 적용 | 가상매매 SL/TP가 auto-optimizer 결과를 따름 | 5.9.1 | cc:TODO |
 
+## Phase 5.10: 포지션 가격 경로 차트
+
+| Task | 내용 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 5.10.1 | TradeRecord에 sl_price, tp_price 컬럼 추가 + 마이그레이션 | 실거래 기록에 SL/TP 가격 저장, 기존 DB 호환 | - | cc:완了 |
+| 5.10.2 | 엔진에서 실거래 진입/청산 시 sl_price, tp_price 기록 | _open_position, _close_current에서 TradeRecord에 SL/TP 저장 | 5.10.1 | cc:완了 |
+| 5.10.3 | 거래 상세 API — 포지션 구간 캔들 + SL/TP 데이터 반환 | /api/trade/{id}/chart 엔드포인트, opened_at~closed_at 구간 바이낸스 캔들 + SL/TP 반환 | 5.10.2 | cc:완了 |
+| 5.10.4 | 모바일 대시보드 포지션 차트 UI — 캔들 + SL/TP 밴드 + 진입/청산 마커 | 거래 내역에서 탭하면 entry→exit 캔들차트 + SL/TP 수평선 표시 | 5.10.3 | cc:WIP |
+
 ## Phase 6: 수익 전략 확정 — 실거래 전환
 
 | Task | 내용 | DoD | Depends | Status |
