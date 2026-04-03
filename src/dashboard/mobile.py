@@ -660,8 +660,8 @@ body {
 
 <div class="page" id="page-trades">
   <div class="card">
-    <div class="card-title">가상매매 요약</div>
-    <div class="metrics" id="tradeSummary"></div>
+    <div class="card-title">전략별 성과</div>
+    <div id="paperStrategyList"><div class="loading"><div class="spinner"></div></div></div>
   </div>
   <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
@@ -678,7 +678,7 @@ body {
     <div id="tradeChartContainer" style="width:100%;height:300px;border-radius:8px;overflow:hidden;display:none;"></div>
   </div>
   <div class="card">
-    <div class="card-title">가상매매 내역</div>
+    <div class="card-title">최근 거래 내역</div>
     <div id="tradeList"><div class="loading"><div class="spinner"></div></div></div>
   </div>
 </div>
@@ -782,7 +782,6 @@ function showPage(name, btn) {
   // Load data for page
   if (name==='home') loadStatus();
   else if (name==='trades') { loadTrades(); loadTradeChart(); }
-  else if (name==='paper') { loadPaper(); loadPaperTrades(); }
   else if (name==='bots') loadStatus();
   else if (name==='settings') loadSettingsForm();
 }
@@ -933,45 +932,72 @@ async function toggleBot(symbol, start) {
 
 // ─── Trades ──────────────────────────────────
 async function loadTrades() {
-  // 가상매매 (5개 전략) 거래 내역
-  const r = await authFetch('/api/paper/trades?limit=100');
-  if (!r) return;
-  const trades = await r.json();
+  // 1) 전략별 성과 요약
+  try {
+    const r = await authFetch('/api/paper');
+    if (r) {
+      const d = await r.json();
+      const el = document.getElementById('paperStrategyList');
+      if (!d.balances || !d.balances.length) {
+        el.innerHTML = '<div style="text-align:center;padding:16px;color:var(--dim)">가상매매 데이터 없음</div>';
+      } else {
+        el.innerHTML = d.balances.map(b => {
+          const pnl = b.balance - b.initial;
+          const pnlPct = (pnl / b.initial * 100);
+          const wr = b.trades > 0 ? (b.wins/b.trades*100).toFixed(1) : '0';
+          const pos = d.positions.filter(p=>p.strategy===b.strategy);
+          const label = strategiesCache.find(x=>x.name===b.strategy);
+          const name = label ? label.label : b.strategy;
+          return `
+            <div class="paper-row">
+              <div class="paper-header">
+                <span class="paper-name">${name}</span>
+                <span class="paper-bal ${cls(pnl)}">${fmt(b.balance)} <small>(${pnl>=0?'+':''}${pnlPct.toFixed(1)}%)</small></span>
+              </div>
+              <div class="paper-stats">
+                <span>${b.trades}건</span>
+                <span>승률 ${wr}%</span>
+                <span>${b.wins}W/${b.losses}L</span>
+              </div>
+              ${pos.map(p => `
+                <div style="margin-top:6px;font-size:12px;padding:6px 8px;background:var(--bg);border-radius:6px;">
+                  <span class="pos-side ${p.side.toLowerCase()}" style="font-size:10px">${p.side}</span>
+                  ${p.symbol.replace('USDT','')} @ ${fmt(p.entry)}
+                  <span style="color:var(--dim)">SL ${fmt(p.sl)} / TP ${fmt(p.tp)}</span>
+                </div>
+              `).join('')}
+            </div>
+          `;
+        }).join('');
+      }
+    }
+  } catch(e) { console.error('loadTrades paper:', e); }
 
-  if (!trades.length) {
-    document.getElementById('tradeSummary').innerHTML = '';
-    document.getElementById('tradeList').innerHTML =
-      '<div style="text-align:center;padding:16px;color:var(--dim)">가상매매 거래 없음</div>';
-    return;
-  }
-
-  const totalNet = trades.reduce((s,t)=>s+t.pnl,0);
-  const totalFee = trades.reduce((s,t)=>s+t.fee,0);
-  const wins = trades.filter(t=>t.pnl>0).length;
-  const winRate = (wins/trades.length*100);
-
-  document.getElementById('tradeSummary').innerHTML = `
-    <div class="metric sm"><div class="value ${cls(totalNet)}">${fmt(totalNet)}</div><div class="label">순손익</div></div>
-    <div class="metric sm"><div class="value">${fmt(totalFee,4)}</div><div class="label">수수료</div></div>
-    <div class="metric sm"><div class="value">${winRate.toFixed(1)}%</div><div class="label">승률</div></div>
-    <div class="metric sm"><div class="value">${trades.length}건</div><div class="label">거래수</div></div>
-  `;
-
-  document.getElementById('tradeList').innerHTML = trades.map(t => `
-    <div class="trade-item" onclick="openTradeChart(${t.id},'paper')" style="cursor:pointer;">
-      <div class="trade-info">
-        <div class="trade-sym">${t.symbol.replace('USDT','')} <span class="pos-side ${t.side==='BUY'||t.side==='LONG'?'long':'short'}" style="font-size:10px">${t.side}</span>
-          <span style="font-size:10px;color:var(--accent);margin-left:4px;">${t.strategy.replace('_scalper','')}</span>
-          ${t.reason ? '<span style="font-size:10px;color:var(--dim);margin-left:4px;">'+t.reason+'</span>' : ''}
+  // 2) 최근 거래 내역
+  try {
+    const r2 = await authFetch('/api/paper/trades?limit=30');
+    if (!r2) return;
+    const trades = await r2.json();
+    if (!trades.length) {
+      document.getElementById('tradeList').innerHTML =
+        '<div style="text-align:center;padding:16px;color:var(--dim)">거래 없음</div>';
+      return;
+    }
+    document.getElementById('tradeList').innerHTML = trades.map(t => `
+      <div class="trade-item" onclick="openTradeChart(${t.id},'paper')" style="cursor:pointer;">
+        <div class="trade-info">
+          <div class="trade-sym">${t.symbol.replace('USDT','')} <span class="pos-side ${t.side==='BUY'||t.side==='LONG'?'long':'short'}" style="font-size:10px">${t.side}</span>
+            <span style="font-size:10px;color:var(--accent);margin-left:4px;">${(strategiesCache.find(x=>x.name===t.strategy)||{}).label||t.strategy}</span>
+            ${t.reason ? '<span style="font-size:10px;color:var(--dim);margin-left:2px;">'+t.reason+'</span>' : ''}
+          </div>
+          <div class="trade-meta">${fmt(t.entry)} → ${fmt(t.exit)} · ${t.closed_at ? new Date(t.closed_at).toLocaleString('ko',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : ''}</div>
         </div>
-        <div class="trade-meta">${fmt(t.entry)} → ${fmt(t.exit)}</div>
-        <div class="trade-meta">${t.closed_at ? new Date(t.closed_at).toLocaleString('ko') : ''}</div>
+        <div>
+          <div class="trade-pnl ${cls(t.pnl)}">${fmt(t.pnl)}</div>
+        </div>
       </div>
-      <div>
-        <div class="trade-pnl ${cls(t.pnl)}">${fmt(t.pnl)}</div>
-      </div>
-    </div>
-  `).join('');
+    `).join('');
+  } catch(e) { console.error('loadTrades list:', e); }
 }
 
 // ─── Paper Trading ───────────────────────────
