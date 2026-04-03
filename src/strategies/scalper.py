@@ -23,6 +23,7 @@ class ScalperState:
     contrarian_mode: bool = False    # 역추세 모드
     total_trades: int = 0
     recent_pnls: list[float] = field(default_factory=list)
+    entry_atr: float = 0.0          # 진입 시점 ATR (동적 SL/TP용)
 
     def record_result(self, pnl: float) -> None:
         self.recent_pnls.append(pnl)
@@ -55,6 +56,10 @@ class MomentumFlipScalper(Strategy):
     3. 방향이 바뀌면 → 기존 포지션 청산 + 반대 방향 진입
     4. 3연패 시 → 신호를 반전 (역추세 모드)
     """
+
+    # ATR 기반 동적 SL/TP — 1:1 비율로 SL 편중 해소
+    SL_ATR_MULT = 2.0   # SL = 2 × ATR
+    TP_ATR_MULT = 2.0   # TP = 2 × ATR (SL과 동일 → 히트율 균등화)
 
     def __init__(self, ema_fast: int = 3, ema_slow: int = 8) -> None:
         self.ema_fast = ema_fast
@@ -91,6 +96,17 @@ class MomentumFlipScalper(Strategy):
         df = candles.copy()
         close = df["close"]
         volume = df["volume"]
+
+        # ── 0. ATR 계산 (동적 SL/TP용) ──
+        high, low = df["high"], df["low"]
+        tr = pd.concat([
+            high - low,
+            (high - close.shift(1)).abs(),
+            (low - close.shift(1)).abs(),
+        ], axis=1).max(axis=1)
+        atr_val = tr.rolling(14).mean().iloc[-1]
+        if pd.notna(atr_val) and atr_val > 0:
+            self.state.entry_atr = float(atr_val)
 
         # ── 1. EMA 크로스 방향 ──
         ema_fast = close.ewm(span=self.ema_fast, adjust=False).mean()

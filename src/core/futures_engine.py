@@ -203,9 +203,15 @@ class FuturesEngine:
             if result:
                 strategy = self.strategies.get(symbol)
                 if strategy and hasattr(strategy, "SL_ATR_MULT"):
-                    # 최소 하한 — 넓은 SL로 노이즈 생존, 넓은 TP로 수수료 커버
-                    sl = max(result["sl_mult"], 5.0)
-                    tp = max(result["tp_mult"], 8.0)
+                    mode = getattr(strategy, "mode", None)
+                    if mode == ExecutionMode.ALWAYS_FLIP:
+                        # v1: 1:1 대칭 비율 (SL 편중 해소)
+                        sl = max(result["sl_mult"], 2.0)
+                        tp = max(result["tp_mult"], 2.0)
+                    else:
+                        # v2+: 넓은 SL로 노이즈 생존, 넓은 TP로 수수료 커버
+                        sl = max(result["sl_mult"], 5.0)
+                        tp = max(result["tp_mult"], 8.0)
                     trail_act = max(result["trail_act_mult"], 8.0)
                     trail_dist = max(result["trail_dist_mult"], 2.0)
 
@@ -241,8 +247,16 @@ class FuturesEngine:
 
         price = float(candles.iloc[-1]["close"])
         pos = await self.client.get_position(symbol)
-        tp_pct = db.get_setting_float("tp_pct")
-        sl_pct = db.get_setting_float("sl_pct")
+
+        # ATR 기반 (v1.1) vs 고정 % (v1) 자동 선택
+        state = getattr(strategy, "state", None)
+        entry_atr = getattr(state, "entry_atr", 0) if state else 0
+        if entry_atr > 0 and hasattr(strategy, "SL_ATR_MULT") and price > 0:
+            sl_pct = (entry_atr * strategy.SL_ATR_MULT) / price
+            tp_pct = (entry_atr * strategy.TP_ATR_MULT) / price
+        else:
+            tp_pct = db.get_setting_float("tp_pct")
+            sl_pct = db.get_setting_float("sl_pct")
 
         # TP/SL
         if pos:
