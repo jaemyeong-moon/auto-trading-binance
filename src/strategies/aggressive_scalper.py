@@ -123,6 +123,10 @@ class AggressiveMomentumRider(Strategy):
 
     def evaluate(self, symbol: str, candles: pd.DataFrame,
                  htf_candles: pd.DataFrame | None = None) -> Signal:
+        from src.core.time_filter import is_tradeable_hour
+        if not is_tradeable_hour():
+            return self._hold(symbol, reason="blocked_hour")
+
         # 15분봉이 핵심 — 없으면 판단 불가
         if htf_candles is None or len(htf_candles) < 210:
             return self._hold(symbol, reason="insufficient_htf")
@@ -191,7 +195,7 @@ class AggressiveMomentumRider(Strategy):
         # ── 3. 눌림목 감지 ──
         if bias == "LONG":
             pullback = htf_low <= e20 * 1.002 and htf_price > e20
-            rsi_ok = 35 < rsi < 60
+            rsi_ok = 35 < rsi < 55  # LONG RSI 상한 축소 (과매수 진입 방지)
         else:
             pullback = htf_high >= e20 * 0.998 and htf_price < e20
             rsi_ok = 40 < rsi < 65

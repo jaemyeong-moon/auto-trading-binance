@@ -240,6 +240,10 @@ class AdaptiveScalper(Strategy):
 
     def evaluate(self, symbol: str, candles: pd.DataFrame,
                  htf_candles: pd.DataFrame | None = None) -> Signal:
+        from src.core.time_filter import is_tradeable_hour
+        if not is_tradeable_hour():
+            return self._hold(symbol, reason="blocked_hour")
+
         if len(candles) < 100:
             return self._hold(symbol, reason="insufficient_data")
 

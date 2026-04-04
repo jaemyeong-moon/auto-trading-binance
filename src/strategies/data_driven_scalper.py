@@ -34,8 +34,7 @@ MIN_RR_RATIO = 1.5        # 최소 리스크-리워드
 SL_ATR_MULT = 1.5         # SL = 1.5 ATR (타이트)
 TP_ATR_MULT = 3.0         # TP = 3.0 ATR (넉넉)
 
-# 매매 금지 시간대 (KST) — 데이터 기반: 0~9시 승률 10%
-NO_TRADE_HOURS_KST = set(range(0, 10))  # 0, 1, 2, ..., 9
+# 시간대 필터 → src/core/time_filter.py 로 이관 (DB 기반 동적 필터)
 
 # 진입 점수 임계값
 SCORE_THRESHOLD = 5        # 8점 만점 중 5점
@@ -302,17 +301,16 @@ class DataDrivenScalper(Strategy):
 
     def evaluate(self, symbol: str, candles: pd.DataFrame,
                  htf_candles: pd.DataFrame | None = None) -> Signal:
+        from src.core.time_filter import is_tradeable_hour
+        if not is_tradeable_hour():
+            return self._hold(symbol, reason="blocked_hour")
+
         if len(candles) < 100:
             return self._hold(symbol, reason="insufficient_data")
 
         df = candles.copy()
         close = df["close"]
         price = close.iloc[-1]
-
-        # ── 시간대 필터 (KST) ──
-        kst_hour = get_kst_hour()
-        if kst_hour in NO_TRADE_HOURS_KST:
-            return self._hold(symbol, reason="no_trade_hour", kst_hour=kst_hour)
 
         # ── 쿨다운 ──
         if self.state.cooldown_remaining > 0:
@@ -321,6 +319,7 @@ class DataDrivenScalper(Strategy):
                               remaining=self.state.cooldown_remaining)
 
         # ── 시간당 매매 제한 ──
+        kst_hour = get_kst_hour()
         if not self.state.check_trade_limit(kst_hour):
             return self._hold(symbol, reason="trade_limit")
 

@@ -58,8 +58,8 @@ class MomentumFlipScalper(Strategy):
     """
 
     # ATR 기반 동적 SL/TP — 1:1 비율로 SL 편중 해소
-    SL_ATR_MULT = 2.0   # SL = 2 × ATR
-    TP_ATR_MULT = 2.0   # TP = 2 × ATR (SL과 동일 → 히트율 균등화)
+    SL_ATR_MULT = 2.5   # SL = 2.5 × ATR (노이즈 조기 손절 방지)
+    TP_ATR_MULT = 3.75  # TP = 3.75 × ATR (1:1.5 RR 보장)
 
     def __init__(self, ema_fast: int = 3, ema_slow: int = 8) -> None:
         self.ema_fast = ema_fast
@@ -87,6 +87,10 @@ class MomentumFlipScalper(Strategy):
 
     def evaluate(self, symbol: str, candles: pd.DataFrame,
                  htf_candles: pd.DataFrame | None = None) -> Signal:
+        from src.core.time_filter import is_tradeable_hour
+        if not is_tradeable_hour():
+            return Signal(symbol=symbol, type=SignalType.HOLD, confidence=0.0, source=self.name)
+
         if len(candles) < self.ema_slow + 5:
             return Signal(
                 symbol=symbol, type=SignalType.HOLD,
@@ -130,10 +134,14 @@ class MomentumFlipScalper(Strategy):
         vol_now = volume.iloc[-1]
         vol_strong = vol_now > vol_avg * 1.2
 
-        # ── 3. 방향 결정 ──
+        # ── 3. 방향 결정 (LONG은 거래량 확인 필수) ──
         if cross_up:
+            if not vol_strong:
+                return Signal(symbol=symbol, type=SignalType.HOLD,
+                              confidence=0.0, source=self.name,
+                              metadata={"reason": "long_needs_volume"})
             raw_direction = "LONG"
-            confidence = 0.9 if vol_strong else 0.7
+            confidence = 0.9
         elif cross_down:
             raw_direction = "SHORT"
             confidence = 0.9 if vol_strong else 0.7

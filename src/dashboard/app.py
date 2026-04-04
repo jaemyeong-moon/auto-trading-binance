@@ -638,6 +638,93 @@ def build_trade_lifecycle_chart(symbol: str | None = None, limit: int = 20):
     return fig
 
 
+def render_trade_progress_bar(
+    side: str, entry_price: float, exit_price: float,
+    sl_price: float | None, tp_price: float | None,
+    reason: str = "", net_pnl: float = 0,
+):
+    """개별 거래의 프로그레스바 — SL↔진입↔TP 구간에서 청산 위치를 시각화.
+
+    API 호출 없이 DB 데이터만으로 즉시 렌더링.
+    Returns: HTML string for st.markdown(unsafe_allow_html=True)
+    """
+    if not sl_price or not tp_price:
+        return None
+
+    is_long = side == "LONG"
+    is_win = net_pnl > 0
+
+    # 바 전체 범위: SL ~ TP (항상 왼쪽=SL, 오른쪽=TP)
+    bar_min = min(sl_price, tp_price)
+    bar_max = max(sl_price, tp_price)
+    bar_range = bar_max - bar_min
+    if bar_range <= 0:
+        return None
+
+    # 각 가격의 % 위치 (0~100)
+    def pct(price):
+        return max(0, min(100, (price - bar_min) / bar_range * 100))
+
+    entry_pct = pct(entry_price)
+    exit_pct = pct(exit_price)
+
+    # LONG: SL(왼)<진입<TP(오른) / SHORT: TP(왼)<진입<SL(오른)
+    if is_long:
+        left_label = f"SL ${sl_price:,.1f}"
+        right_label = f"TP ${tp_price:,.1f}"
+        loss_start, loss_end = 0, entry_pct
+        profit_start, profit_end = entry_pct, 100
+    else:
+        left_label = f"TP ${tp_price:,.1f}"
+        right_label = f"SL ${sl_price:,.1f}"
+        loss_start, loss_end = entry_pct, 100
+        profit_start, profit_end = 0, entry_pct
+
+    pnl_text = f"${net_pnl:+,.2f}" if net_pnl else ""
+    exit_color = "#26a69a" if is_win else "#ef5350"
+    reason_text = reason if reason else ""
+
+    # 청산 마커 위치가 바 밖으로 나갈 경우 클램프
+    exit_pct_clamped = max(2, min(98, exit_pct))
+
+    html = f"""
+    <div style="position:relative; height:56px; margin:4px 0 8px 0; font-family:monospace; font-size:12px;">
+      <!-- 바 배경 -->
+      <div style="position:absolute; top:18px; left:0; right:0; height:20px; border-radius:4px; overflow:hidden; background:#1e1e1e; border:1px solid #333;">
+        <!-- 손실 구간 (빨강) -->
+        <div style="position:absolute; left:{loss_start}%; width:{loss_end - loss_start}%; height:100%;
+                     background:linear-gradient(90deg, rgba(239,83,80,0.35), rgba(239,83,80,0.15));"></div>
+        <!-- 수익 구간 (초록) -->
+        <div style="position:absolute; left:{profit_start}%; width:{profit_end - profit_start}%; height:100%;
+                     background:linear-gradient(90deg, rgba(38,166,154,0.15), rgba(38,166,154,0.35));"></div>
+        <!-- 진입 라인 -->
+        <div style="position:absolute; left:{entry_pct}%; top:0; width:2px; height:100%;
+                     background:rgba(255,255,255,0.8); transform:translateX(-1px);"></div>
+        <!-- 청산 마커 -->
+        <div style="position:absolute; left:{exit_pct_clamped}%; top:-2px; width:10px; height:24px;
+                     transform:translateX(-5px); display:flex; align-items:center; justify-content:center;">
+          <div style="width:10px; height:10px; border-radius:50%; background:{exit_color};
+                      border:2px solid white; box-shadow:0 0 4px {exit_color};"></div>
+        </div>
+      </div>
+      <!-- 왼쪽 라벨 (SL 또는 TP) -->
+      <div style="position:absolute; top:0; left:0; color:{'#ef5350' if is_long else '#26a69a'}; font-size:10px;">
+        {left_label}</div>
+      <!-- 오른쪽 라벨 (TP 또는 SL) -->
+      <div style="position:absolute; top:0; right:0; color:{'#26a69a' if is_long else '#ef5350'}; font-size:10px; text-align:right;">
+        {right_label}</div>
+      <!-- 진입 라벨 -->
+      <div style="position:absolute; top:0; left:{entry_pct}%; transform:translateX(-50%); color:#fff; font-size:10px; font-weight:bold;">
+        ▼진입</div>
+      <!-- 청산 라벨 -->
+      <div style="position:absolute; top:40px; left:{exit_pct_clamped}%; transform:translateX(-50%);
+                   color:{exit_color}; font-size:10px; white-space:nowrap;">
+        ●청산 {reason_text} {pnl_text}</div>
+    </div>
+    """
+    return html
+
+
 def load_trades_df(symbol: str | None = None) -> pd.DataFrame:
     trades = db.get_trades(symbol=symbol, limit=200)
     if not trades:
@@ -650,6 +737,8 @@ def load_trades_df(symbol: str | None = None) -> pd.DataFrame:
         "순손익": round(t.net_pnl if t.net_pnl is not None else (t.pnl or 0), 2),
         "손익(%)": round(t.pnl_pct, 2) if t.pnl_pct is not None else 0,
         "전략": t.strategy, "청산시간": t.closed_at,
+        "SL": t.sl_price, "TP": t.tp_price,
+        "진입시간": t.opened_at, "사유": t.reason or "",
     } for t in trades])
 
 
@@ -1030,6 +1119,7 @@ elif page == "시뮬레이션":
                     # 최근 거래
                     s_trades = trade_data.get(sname, [])
                     if s_trades:
+                        completed = [t for t in s_trades if t.exit_price][:20]
                         st.markdown("**최근 거래:**")
                         tdf = pd.DataFrame([{
                             "심볼": t.symbol, "방향": t.side,
@@ -1040,8 +1130,29 @@ elif page == "시뮬레이션":
                             "손익": f"${t.net_pnl:+,.4f}" if t.net_pnl is not None else "—",
                             "사유": t.reason or "—",
                             "시간": t.closed_at,
-                        } for t in s_trades[:20]])
+                        } for t in completed])
                         st.dataframe(tdf, use_container_width=True, hide_index=True)
+
+                        # 거래별 SL/TP 프로그레스바
+                        for pt in completed[:20]:
+                            if not pt.exit_price or not pt.sl_price or not pt.tp_price:
+                                continue
+                            pt_pnl = pt.net_pnl or 0
+                            bar_html = render_trade_progress_bar(
+                                side=pt.side, entry_price=pt.entry_price,
+                                exit_price=pt.exit_price,
+                                sl_price=pt.sl_price, tp_price=pt.tp_price,
+                                reason=pt.reason or "", net_pnl=pt_pnl,
+                            )
+                            if bar_html:
+                                pt_icon = "🟢" if pt_pnl >= 0 else "🔴"
+                                st.markdown(
+                                    f"<div style='font-size:11px; color:#aaa; margin-top:4px;'>"
+                                    f"{pt_icon} {pt.symbol} {pt.side} ${pt_pnl:+,.4f} | {pt.reason or ''}"
+                                    f"</div>",
+                                    unsafe_allow_html=True,
+                                )
+                                st.markdown(bar_html, unsafe_allow_html=True)
                     else:
                         st.caption("아직 완료된 거래 없음")
 
@@ -1465,7 +1576,39 @@ elif page == "거래 내역":
             ).round(2)
             st.subheader("심볼별 요약")
             st.dataframe(summary, use_container_width=True)
-        st.dataframe(trades_df, use_container_width=True)
+
+        # 거래 내역 테이블 (SL/TP/진입시간/사유는 차트용이므로 숨김)
+        display_cols = [c for c in trades_df.columns if c not in ("SL", "TP", "진입시간", "사유")]
+        st.dataframe(trades_df[display_cols], use_container_width=True)
+
+        # ── 거래별 SL/TP 프로그레스바 ──
+        st.subheader("거래별 가격 경로")
+        st.caption("SL↔진입↔TP 구간에서 실제 청산 위치를 프로그레스바로 표시합니다.")
+
+        show_limit = min(50, len(trades_df))
+        for i in range(show_limit):
+            row = trades_df.iloc[i]
+            pnl_val = row["순손익"]
+            sl = row.get("SL")
+            tp = row.get("TP")
+
+            if pd.isna(sl) or pd.isna(tp) or not sl or not tp:
+                continue
+
+            icon = "🟢" if pnl_val >= 0 else "🔴"
+            header = (
+                f"{icon} #{row['ID']} {row['심볼']} {row['방향']} "
+                f"${pnl_val:+,.2f} ({row['손익(%)']:+.2f}%) "
+                f"| {row['전략']} | {row.get('사유', '')}"
+            )
+            bar_html = render_trade_progress_bar(
+                side=row["방향"], entry_price=row["진입가"],
+                exit_price=row["청산가"], sl_price=sl, tp_price=tp,
+                reason=row.get("사유", ""), net_pnl=pnl_val,
+            )
+            if bar_html:
+                with st.expander(header, expanded=True):
+                    st.markdown(bar_html, unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════════════════

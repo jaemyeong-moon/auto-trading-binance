@@ -60,8 +60,8 @@ class PatternScalper(Strategy):
     횡보장에서도 작동, ADX 필터 없음.
     """
 
-    SL_ATR_MULT = 3.0     # SL = 3 ATR (노이즈 회피)
-    TP_ATR_MULT = 5.0     # TP = 5 ATR (1:1.67 RR)
+    SL_ATR_MULT = 2.5     # SL = 2.5 ATR (손실 크기 축소)
+    TP_ATR_MULT = 5.0     # TP = 5 ATR (1:2 RR)
     MAX_HOLD_TICKS = 100  # 최대 보유 ~25시간(15분봉) — 대손실 방지
 
     def __init__(self) -> None:
@@ -102,6 +102,10 @@ class PatternScalper(Strategy):
 
     def evaluate(self, symbol: str, candles: pd.DataFrame,
                  htf_candles: pd.DataFrame | None = None) -> Signal:
+        from src.core.time_filter import is_tradeable_hour
+        if not is_tradeable_hour():
+            return self._hold(symbol, reason="blocked_hour")
+
         if len(candles) < 130:
             return self._hold(symbol, reason="insufficient_data")
 
@@ -189,6 +193,10 @@ class PatternScalper(Strategy):
             confidence *= 0.85
 
         confidence = min(1.0, confidence)
+
+        # LONG 패턴은 confidence 10% 페널티 (LONG 손실 패턴 방어)
+        if best.direction == "LONG":
+            confidence *= 0.9
 
         if confidence < 0.2:
             return self._hold(symbol, reason="low_confidence",

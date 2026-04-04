@@ -17,7 +17,7 @@ from src.core import database as db
 logger = structlog.get_logger()
 
 # 탐색 범위 (넓은 SL + 넓은 TP = 승률 우선)
-SL_RANGE = [5.0, 6.0, 8.0, 10.0]                      # ATR 배수
+SL_RANGE = [6.0, 8.0, 10.0, 12.0]                      # ATR 배수 (너무 타이트한 5.0 제거)
 TP_RANGE = [8.0, 10.0, 12.0, 15.0]                    # ATR 배수
 TRAIL_ACT_RANGE = [8.0, 10.0, 12.0]                   # ATR 배수
 TRAIL_DIST_RANGE = [2.0, 3.0, 4.0]                    # ATR 배수

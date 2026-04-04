@@ -32,7 +32,7 @@ LEVERAGE = 5
 RISK_PCT = 0.01           # 잔고의 1% 리스크
 RR_RATIO = 1.5            # 1:1.5 손익비 (평균회귀는 빠르게)
 TOTAL_COST_PCT = 0.001    # 수수료+슬리피지 0.1%
-SL_ATR_MULT = 1.5         # SL = 1.5 ATR (v9의 2.0보다 타이트)
+SL_ATR_MULT = 2.0         # SL = 2.0 ATR (역추세 전략은 넓은 SL 필요)
 MAX_DAILY_TRADES = 8
 COOLDOWN_WIN = 6           # 30초 (5초×6)
 COOLDOWN_LOSS = 36         # 3분
@@ -133,6 +133,10 @@ class ContrarianScalper(Strategy):
 
     def evaluate(self, symbol: str, candles: pd.DataFrame,
                  htf_candles: pd.DataFrame | None = None) -> Signal:
+        from src.core.time_filter import is_tradeable_hour
+        if not is_tradeable_hour():
+            return self._hold(symbol, reason="blocked_hour")
+
         if htf_candles is None or len(htf_candles) < 210:
             return self._hold(symbol, reason="insufficient_htf")
 
@@ -211,7 +215,7 @@ class ContrarianScalper(Strategy):
             far_from_mean = distance_from_ema > 0.003
         else:
             # 하락추세에서 과매도 감지: RSI 낮고 + 볼린저 하단 터치
-            overextended = rsi < 35 and htf_price < bb_lower * 1.002
+            overextended = rsi < 30 and htf_price < bb_lower * 1.002  # LONG 과매도 기준 강화
             distance_from_ema = (e20 - htf_price) / e20
             far_from_mean = distance_from_ema > 0.003
 

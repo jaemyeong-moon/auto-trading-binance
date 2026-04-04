@@ -263,11 +263,11 @@ class SmartMomentumScalper(Strategy):
     """
 
     # ATR 배수 기반 TP/SL
-    SL_ATR_MULT = 1.0       # 손절 = 1 × ATR
-    TP_ATR_MULT = 2.0       # 익절 = 2 × ATR (최소 2:1 RR)
-    TRAILING_ATR_MULT = 1.5  # 트레일링 활성화 = 1.5 × ATR
-    TRAILING_DIST_ATR = 0.5  # 트레일링 거리 = 0.5 × ATR
-    PARTIAL_TP_ATR_MULT = 1.0  # 부분익절 = 1 × ATR
+    SL_ATR_MULT = 1.5       # 손절 = 1.5 × ATR (조기 손절 방지)
+    TP_ATR_MULT = 3.0       # 익절 = 3 × ATR (1:2 RR)
+    TRAILING_ATR_MULT = 2.0  # 트레일링 활성화 = 2 × ATR
+    TRAILING_DIST_ATR = 0.8  # 트레일링 거리 = 0.8 × ATR
+    PARTIAL_TP_ATR_MULT = 1.5  # 부분익절 = 1.5 × ATR
 
     SCORE_THRESHOLD = 5      # 7점 만점 중 5점
     MAX_TRADES_PER_HOUR = 4  # 시간당 최대 매매
@@ -311,6 +311,10 @@ class SmartMomentumScalper(Strategy):
 
     def evaluate(self, symbol: str, candles: pd.DataFrame,
                  htf_candles: pd.DataFrame | None = None) -> Signal:
+        from src.core.time_filter import is_tradeable_hour
+        if not is_tradeable_hour():
+            return self._hold(symbol, reason="blocked_hour")
+
         if len(candles) < 100:
             return self._hold(symbol, reason="insufficient_data")
 
@@ -374,10 +378,12 @@ class SmartMomentumScalper(Strategy):
             df, htf_candles, direction, regime, regime_info
         )
 
-        if score < self.SCORE_THRESHOLD:
+        # LONG은 6점, SHORT은 5점 (LONG 손실 패턴 방어)
+        threshold = self.SCORE_THRESHOLD + 1 if direction == "LONG" else self.SCORE_THRESHOLD
+        if score < threshold:
             return self._hold(symbol, reason="low_score",
                               score=score, max_score=max_score,
-                              threshold=self.SCORE_THRESHOLD,
+                              threshold=threshold,
                               details=details, regime=regime.value)
 
         # ── 리스크-리워드 사전 검증 ──
