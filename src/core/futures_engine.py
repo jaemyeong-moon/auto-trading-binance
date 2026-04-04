@@ -394,7 +394,7 @@ class FuturesEngine:
             return True
 
         # ── 부분 익절 (50%) ──
-        if state and not state.partial_tp_taken and change >= partial_tp:
+        if state and not getattr(state, "partial_tp_taken", False) and change >= partial_tp:
             half_qty = self._round_qty(symbol, qty * 0.5)
             # 최소 주문 수량 체크 (너무 작으면 거래소 거부)
             min_qty = self._min_qty(symbol)

@@ -34,6 +34,7 @@ class V12State:
     entry_price: float = 0.0
     entry_atr: float = 0.0
     ticks_in_position: int = 0   # 포지션 보유 틱 수
+    partial_tp_taken: bool = False  # 부분 익절 여부
 
     cooldown_remaining: int = 0
     consecutive_losses: int = 0
@@ -96,6 +97,7 @@ class PatternScalper(Strategy):
             cooldown = COOLDOWN_BASE + self.state.consecutive_losses * 2
             self.state.cooldown_remaining = min(cooldown, 15)
         self.state.position_side = "NONE"
+        self.state.partial_tp_taken = False
         self.state.last_pattern_name = ""
 
     def evaluate(self, symbol: str, candles: pd.DataFrame,
