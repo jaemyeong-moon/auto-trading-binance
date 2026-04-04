@@ -203,77 +203,39 @@ def _build_candlestick_chart(cdf, symbol, pos=None, tp_price=None, sl_price=None
                           line_color="#ef5350", annotation_text=f"SL ${sl_price:,.0f}",
                           row=1, col=1)
 
-    # 페이퍼 거래 마커
+    # 실거래 마커만 표시 (페이퍼 거래는 거래 내역 프로그레스바로 확인)
     if show_trades:
         try:
             chart_start = cdf.index[0]
-            with _get_session() as _session:
-                paper_trades = _session.query(PaperTrade).filter(
-                    PaperTrade.symbol == symbol,
-                    PaperTrade.opened_at >= chart_start,
-                ).order_by(PaperTrade.opened_at).all()
+            real_trades = db.get_trades(symbol=symbol, limit=10)
+            for rt in real_trades:
+                if not rt.opened_at or rt.opened_at < chart_start:
+                    continue
+                is_win = (rt.net_pnl or 0) > 0
+                color = "#26a69a" if is_win else "#ef5350"
+                marker_sym = "triangle-up" if rt.side == "LONG" else "triangle-down"
 
-                paper_positions = _session.query(PaperPosition).filter(
-                    PaperPosition.symbol == symbol,
-                ).all()
+                fig.add_trace(go.Scatter(
+                    x=[rt.opened_at], y=[rt.entry_price],
+                    mode="markers",
+                    marker=dict(symbol=marker_sym, size=12, color="white",
+                                line=dict(width=2, color=color)),
+                    showlegend=False,
+                    hovertext=f"진입 {rt.side} ${rt.entry_price:,.2f}",
+                    hoverinfo="text",
+                ), row=1, col=1)
 
-                for pt in paper_trades:
-                    is_win = pt.net_pnl is not None and pt.net_pnl > 0
-                    color = "#26a69a" if is_win else "#ef5350"
-                    marker_sym = "triangle-up" if pt.side == "LONG" else "triangle-down"
-
-                    if pt.opened_at is not None:
-                        fig.add_trace(go.Scatter(
-                            x=[pt.opened_at], y=[pt.entry_price],
-                            mode="markers+text",
-                            marker=dict(symbol=marker_sym, size=14, color="white",
-                                        line=dict(width=2, color=color)),
-                            text=[f"{pt.strategy[:6]}"],
-                            textposition="top center",
-                            textfont=dict(size=8, color=color),
-                            showlegend=False,
-                            hovertext=f"{pt.strategy} {pt.side} 진입\n${pt.entry_price:,.2f}",
-                            hoverinfo="text",
-                        ), row=1, col=1)
-
-                    if pt.closed_at is not None and pt.exit_price:
-                        pnl_text = f"${pt.net_pnl:+,.2f}" if pt.net_pnl is not None else ""
-                        fig.add_trace(go.Scatter(
-                            x=[pt.closed_at], y=[pt.exit_price],
-                            mode="markers+text",
-                            marker=dict(symbol="x", size=12, color=color,
-                                        line=dict(width=2)),
-                            text=[pnl_text],
-                            textposition="bottom center",
-                            textfont=dict(size=8, color=color),
-                            showlegend=False,
-                            hovertext=f"{pt.strategy} {pt.reason or 'close'}\n"
-                                      f"${pt.exit_price:,.2f} | {pnl_text}",
-                            hoverinfo="text",
-                        ), row=1, col=1)
-
-                for pp in paper_positions:
-                    pp_color = "#2196f3" if pp.side == "LONG" else "#ff5722"
-                    fig.add_hline(
-                        y=pp.entry_price, line_dash="dot", line_color=pp_color,
-                        annotation_text=f"{pp.strategy[:8]} {pp.side} ${pp.entry_price:,.0f}",
-                        annotation_font_size=9, annotation_font_color=pp_color,
-                        row=1, col=1,
-                    )
-                    if pp.sl_price:
-                        fig.add_hline(
-                            y=pp.sl_price, line_dash="dash",
-                            line_color="#ef5350", line_width=0.5,
-                            annotation_text=f"SL ${pp.sl_price:,.0f}",
-                            annotation_font_size=8, row=1, col=1,
-                        )
-                    if pp.tp_price:
-                        fig.add_hline(
-                            y=pp.tp_price, line_dash="dash",
-                            line_color="#26a69a", line_width=0.5,
-                            annotation_text=f"TP ${pp.tp_price:,.0f}",
-                            annotation_font_size=8, row=1, col=1,
-                        )
+                if rt.closed_at and rt.exit_price:
+                    pnl_text = f"${rt.net_pnl:+,.2f}" if rt.net_pnl is not None else ""
+                    fig.add_trace(go.Scatter(
+                        x=[rt.closed_at], y=[rt.exit_price],
+                        mode="markers",
+                        marker=dict(symbol="x", size=10, color=color,
+                                    line=dict(width=2)),
+                        showlegend=False,
+                        hovertext=f"청산 {rt.reason or ''} {pnl_text}",
+                        hoverinfo="text",
+                    ), row=1, col=1)
         except Exception:
             pass
 
