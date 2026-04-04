@@ -1161,6 +1161,7 @@ function switchChartMode() {
 // ─── Lightweight Chart (거래 마커 오버레이) ────
 let chart = null;
 let candleSeries = null;
+let _priceLines = [];  // 수평선 누적 방지용 참조 배열
 let volumeSeries = null;
 let markers = [];
 
@@ -1202,6 +1203,10 @@ async function loadChart() {
 
     if (!chart) initChart();
 
+    // 기존 수평선 제거 (누적 방지)
+    _priceLines.forEach(pl => { try { candleSeries.removePriceLine(pl); } catch(e) {} });
+    _priceLines = [];
+
     candleSeries.setData(d.candles.map(c => ({
       time: c.time, open: c.open, high: c.high, low: c.low, close: c.close,
     })));
@@ -1215,24 +1220,24 @@ async function loadChart() {
       const info = statusCache.positions[sym];
       const pos = info.position;
       if (pos && pos.entry_price > 0) {
-        candleSeries.createPriceLine({
+        _priceLines.push(candleSeries.createPriceLine({
           price: pos.entry_price, color: '#ffd54f', lineWidth: 2,
           lineStyle: LightweightCharts.LineStyle.Solid,
           axisLabelVisible: true, title: `Entry ${pos.side}`,
-        });
+        }));
         if (pos.sl_price && pos.sl_price > 0) {
-          candleSeries.createPriceLine({
+          _priceLines.push(candleSeries.createPriceLine({
             price: pos.sl_price, color: '#ef5350', lineWidth: 1,
             lineStyle: LightweightCharts.LineStyle.Dashed,
             axisLabelVisible: true, title: 'SL',
-          });
+          }));
         }
         if (pos.tp_price && pos.tp_price > 0) {
-          candleSeries.createPriceLine({
+          _priceLines.push(candleSeries.createPriceLine({
             price: pos.tp_price, color: '#26a69a', lineWidth: 1,
             lineStyle: LightweightCharts.LineStyle.Dashed,
             axisLabelVisible: true, title: 'TP',
-          });
+          }));
         }
       }
     }
