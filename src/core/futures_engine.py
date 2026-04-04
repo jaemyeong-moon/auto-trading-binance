@@ -457,6 +457,16 @@ class FuturesEngine:
         quantity = (invest * leverage) / price
         quantity = self._round_qty(symbol, quantity)
 
+        # 최소 notional 충족
+        min_notional = 100
+        if quantity * price < min_notional:
+            min_qty = self._round_qty(symbol, min_notional / price + 10 ** -self._qty_precision(symbol))
+            if (min_qty * price) / leverage <= balance * 0.9:
+                quantity = min_qty
+                invest = (quantity * price) / leverage
+            else:
+                return
+
         if quantity <= 0 or invest < 5:
             return
 
@@ -525,6 +535,25 @@ class FuturesEngine:
         quantity = (invest * leverage) / price
         quantity = self._round_qty(symbol, quantity)
 
+        # 바이낸스 선물 최소 주문금액 (notional) 충족 확인
+        min_notional = 100  # USDT
+        notional = quantity * price
+        if notional < min_notional:
+            # 최소 notional을 충족하도록 quantity 보정
+            min_qty = self._round_qty(symbol, min_notional / price + 10 ** -self._qty_precision(symbol))
+            required_margin = (min_qty * price) / leverage
+            if required_margin <= balance * 0.9:
+                quantity = min_qty
+                invest = (quantity * price) / leverage
+                logger.info("engine.notional_adjusted",
+                            symbol=symbol, notional=f"${quantity * price:.0f}",
+                            margin=f"${invest:.2f}")
+            else:
+                logger.warning("engine.insufficient_for_min_notional",
+                               symbol=symbol, balance=balance,
+                               required_margin=f"${required_margin:.2f}")
+                return
+
         if quantity <= 0 or invest < 5:
             logger.warning("engine.insufficient_balance",
                            symbol=symbol, balance=balance, invest=invest)
@@ -540,6 +569,10 @@ class FuturesEngine:
             if "-2019" in err_msg:
                 logger.warning("engine.margin_insufficient",
                                symbol=symbol, balance=balance, invest=invest)
+            elif "-4164" in err_msg:
+                logger.warning("engine.min_notional_error",
+                               symbol=symbol, notional=f"${quantity * price:.0f}",
+                               balance=balance)
             else:
                 logger.exception("engine.order_failed",
                                  symbol=symbol, direction=direction)
@@ -642,12 +675,15 @@ class FuturesEngine:
         except Exception:
             logger.exception("engine.sl_tp_place_failed", symbol=symbol)
 
-    def _round_qty(self, symbol: str, quantity: float) -> float:
+    def _qty_precision(self, symbol: str) -> int:
         precision = {
             "BTCUSDT": 3, "ETHUSDT": 3, "BNBUSDT": 2,
             "SOLUSDT": 1, "XRPUSDT": 0,
         }
-        return round(quantity, precision.get(symbol, 3))
+        return precision.get(symbol, 3)
+
+    def _round_qty(self, symbol: str, quantity: float) -> float:
+        return round(quantity, self._qty_precision(symbol))
 
     def _min_qty(self, symbol: str) -> float:
         """심볼별 최소 주문 수량 (바이낸스 선물)."""
