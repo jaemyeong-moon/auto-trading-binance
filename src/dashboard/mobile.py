@@ -553,12 +553,21 @@ body {
 .bot-pill button.stop { background:rgba(239,83,80,0.2); color:var(--red); }
 
 /* Trade list */
-.trade-item { padding: 10px 0; display: flex; justify-content: space-between; align-items: center; }
+.trade-item { padding: 10px 0; }
 .trade-item + .trade-item { border-top: 1px solid var(--border); }
+.trade-row { display: flex; justify-content: space-between; align-items: center; }
 .trade-info .trade-sym { font-weight: 600; font-size: 14px; }
 .trade-info .trade-meta { font-size: 11px; color: var(--dim); }
 .trade-pnl { font-weight: 700; font-size: 15px; text-align: right; }
 .trade-pnl-pct { font-size: 11px; text-align: right; }
+/* SL/TP progress bar */
+.sltp-bar { position:relative; height:18px; margin:6px 0 2px; border-radius:4px; overflow:hidden; background:#1a1a2e; }
+.sltp-bar .zone { position:absolute; top:0; height:100%; }
+.sltp-bar .zone.loss { background:rgba(239,83,80,0.25); }
+.sltp-bar .zone.profit { background:rgba(38,166,154,0.25); }
+.sltp-bar .entry-line { position:absolute; top:0; width:2px; height:100%; background:rgba(255,255,255,0.7); }
+.sltp-bar .exit-dot { position:absolute; top:3px; width:12px; height:12px; border-radius:50%; border:2px solid #fff; transform:translateX(-6px); }
+.sltp-labels { display:flex; justify-content:space-between; font-size:9px; color:var(--dim); margin-top:1px; }
 
 /* Paper trading */
 .paper-row { padding: 10px 0; }
@@ -791,6 +800,35 @@ const fmt = (n,d=2) => n!=null ? '$'+Number(n).toLocaleString('en',{minimumFract
 const pct = (n) => n!=null ? (n>=0?'+':'')+n.toFixed(2)+'%' : '-';
 const cls = (n) => n>=0 ? 'positive' : 'negative';
 
+// ─── SL/TP Progress Bar ─────────────────────
+function buildSltpBar(side, entry, exit, sl, tp, pnl) {
+  if (!sl || !tp || !entry || !exit) return '';
+  const isLong = side === 'LONG' || side === 'BUY';
+  const barMin = Math.min(sl, tp);
+  const barMax = Math.max(sl, tp);
+  const range = barMax - barMin;
+  if (range <= 0) return '';
+  const p = (v) => Math.max(0, Math.min(100, (v - barMin) / range * 100));
+  const entryPct = p(entry);
+  const exitPct = Math.max(2, Math.min(98, p(exit)));
+  const isWin = pnl > 0;
+  const exitColor = isWin ? 'var(--green)' : 'var(--red)';
+  // zone boundaries
+  let lossL, lossW, profitL, profitW;
+  if (isLong) { lossL=0; lossW=entryPct; profitL=entryPct; profitW=100-entryPct; }
+  else { profitL=0; profitW=entryPct; lossL=entryPct; lossW=100-entryPct; }
+  const slLabel = isLong ? `SL ${sl.toFixed(0)}` : `TP ${tp.toFixed(0)}`;
+  const tpLabel = isLong ? `TP ${tp.toFixed(0)}` : `SL ${sl.toFixed(0)}`;
+  return `
+    <div class="sltp-bar">
+      <div class="zone loss" style="left:${lossL}%;width:${lossW}%"></div>
+      <div class="zone profit" style="left:${profitL}%;width:${profitW}%"></div>
+      <div class="entry-line" style="left:${entryPct}%"></div>
+      <div class="exit-dot" style="left:${exitPct}%;background:${exitColor}"></div>
+    </div>
+    <div class="sltp-labels"><span>${slLabel}</span><span>${tpLabel}</span></div>`;
+}
+
 // ─── Load Status ─────────────────────────────
 let statusCache = null;
 
@@ -887,21 +925,26 @@ async function loadRecentTrades() {
       '<div style="text-align:center;padding:16px;color:var(--dim)">실거래 내역 없음</div>';
     return;
   }
-  document.getElementById('recentTrades').innerHTML = trades.map(t => `
+  document.getElementById('recentTrades').innerHTML = trades.map(t => {
+    const bar = buildSltpBar(t.side, t.entry, t.exit, t.sl_price, t.tp_price, t.net_pnl);
+    return `
     <div class="trade-item" onclick="openTradeChart(${t.id},'real')" style="cursor:pointer;">
-      <div class="trade-info">
-        <div class="trade-sym">${t.symbol.replace('USDT','')} <span class="pos-side ${t.side==='BUY'||t.side==='LONG'?'long':'short'}" style="font-size:10px">${t.side}</span>
-          ${t.reason ? '<span style="font-size:10px;color:var(--dim);margin-left:4px;">'+t.reason+'</span>' : ''}
+      <div class="trade-row">
+        <div class="trade-info">
+          <div class="trade-sym">${t.symbol.replace('USDT','')} <span class="pos-side ${t.side==='BUY'||t.side==='LONG'?'long':'short'}" style="font-size:10px">${t.side}</span>
+            ${t.reason ? '<span style="font-size:10px;color:var(--dim);margin-left:4px;">'+t.reason+'</span>' : ''}
+          </div>
+          <div class="trade-meta">${fmt(t.entry)} → ${fmt(t.exit)} · ${t.strategy || ''}</div>
+          <div class="trade-meta">${t.closed_at ? new Date(t.closed_at).toLocaleString('ko') : ''}</div>
         </div>
-        <div class="trade-meta">${fmt(t.entry)} → ${fmt(t.exit)} · ${t.strategy || ''}</div>
-        <div class="trade-meta">${t.closed_at ? new Date(t.closed_at).toLocaleString('ko') : ''}</div>
+        <div>
+          <div class="trade-pnl ${cls(t.net_pnl)}">${fmt(t.net_pnl)}</div>
+          <div class="trade-pnl-pct ${cls(t.pnl_pct)}">${pct(t.pnl_pct)}</div>
+        </div>
       </div>
-      <div>
-        <div class="trade-pnl ${cls(t.net_pnl)}">${fmt(t.net_pnl)}</div>
-        <div class="trade-pnl-pct ${cls(t.pnl_pct)}">${pct(t.pnl_pct)}</div>
-      </div>
-    </div>
-  `).join('');
+      ${bar}
+    </div>`;
+  }).join('');
   } catch(e) { console.error('loadRecentTrades error:', e); }
 }
 
@@ -983,20 +1026,25 @@ async function loadTrades() {
         '<div style="text-align:center;padding:16px;color:var(--dim)">거래 없음</div>';
       return;
     }
-    document.getElementById('tradeList').innerHTML = trades.map(t => `
+    document.getElementById('tradeList').innerHTML = trades.map(t => {
+      const bar = buildSltpBar(t.side, t.entry, t.exit, t.sl, t.tp, t.pnl);
+      return `
       <div class="trade-item" onclick="openTradeChart(${t.id},'paper')" style="cursor:pointer;">
-        <div class="trade-info">
-          <div class="trade-sym">${t.symbol.replace('USDT','')} <span class="pos-side ${t.side==='BUY'||t.side==='LONG'?'long':'short'}" style="font-size:10px">${t.side}</span>
-            <span style="font-size:10px;color:var(--accent);margin-left:4px;">${(strategiesCache.find(x=>x.name===t.strategy)||{}).label||t.strategy}</span>
-            ${t.reason ? '<span style="font-size:10px;color:var(--dim);margin-left:2px;">'+t.reason+'</span>' : ''}
+        <div class="trade-row">
+          <div class="trade-info">
+            <div class="trade-sym">${t.symbol.replace('USDT','')} <span class="pos-side ${t.side==='BUY'||t.side==='LONG'?'long':'short'}" style="font-size:10px">${t.side}</span>
+              <span style="font-size:10px;color:var(--accent);margin-left:4px;">${(strategiesCache.find(x=>x.name===t.strategy)||{}).label||t.strategy}</span>
+              ${t.reason ? '<span style="font-size:10px;color:var(--dim);margin-left:2px;">'+t.reason+'</span>' : ''}
+            </div>
+            <div class="trade-meta">${fmt(t.entry)} → ${fmt(t.exit)} · ${t.closed_at ? new Date(t.closed_at).toLocaleString('ko',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : ''}</div>
           </div>
-          <div class="trade-meta">${fmt(t.entry)} → ${fmt(t.exit)} · ${t.closed_at ? new Date(t.closed_at).toLocaleString('ko',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : ''}</div>
+          <div>
+            <div class="trade-pnl ${cls(t.pnl)}">${fmt(t.pnl)}</div>
+          </div>
         </div>
-        <div>
-          <div class="trade-pnl ${cls(t.pnl)}">${fmt(t.pnl)}</div>
-        </div>
-      </div>
-    `).join('');
+        ${bar}
+      </div>`;
+    }).join('');
   } catch(e) { console.error('loadTrades list:', e); }
 }
 
