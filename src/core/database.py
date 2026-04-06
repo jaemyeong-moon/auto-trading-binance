@@ -441,17 +441,28 @@ def record_trail(
 def link_trails_to_trade(
     trade_type: str, trade_id: int, symbol: str,
     entry_price: float, strategy: str = "",
+    session: "Session | None" = None,
 ) -> None:
-    """포지션 청산 시, 해당 포지션의 trail 레코드에 trade_id 연결."""
-    with get_session() as session:
-        q = session.query(PositionTrail).filter_by(
+    """포지션 청산 시, 해당 포지션의 trail 레코드에 trade_id 연결.
+
+    session 인자를 전달하면 그 세션 안에서 실행하고 commit은 호출자가 담당.
+    전달하지 않으면 자체 세션을 열어 commit까지 처리.
+    """
+    def _run(s):
+        q = s.query(PositionTrail).filter_by(
             trade_type=trade_type, symbol=symbol,
             entry_price=entry_price, trade_id=None,
         )
         if strategy:
             q = q.filter_by(strategy=strategy)
         q.update({"trade_id": trade_id})
-        session.commit()
+
+    if session is not None:
+        _run(session)
+    else:
+        with get_session() as s:
+            _run(s)
+            s.commit()
 
 
 def get_trail(trade_type: str, trade_id: int) -> list[dict]:

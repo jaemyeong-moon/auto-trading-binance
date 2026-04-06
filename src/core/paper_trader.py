@@ -170,9 +170,10 @@ class PaperTrader:
         session.add(trade)
         session.flush()  # trade.id 확보
 
-        # 궤적 연결
+        # 궤적 연결 — 같은 세션 내에서 처리해 database is locked 방지
         db.link_trails_to_trade(
-            "paper", trade.id, pos.symbol, pos.entry_price, strategy=name)
+            "paper", trade.id, pos.symbol, pos.entry_price,
+            strategy=name, session=session)
 
         # 잔고 업데이트
         bal = session.query(PaperBalance).filter_by(strategy=name).first()
