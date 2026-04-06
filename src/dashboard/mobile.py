@@ -1039,18 +1039,30 @@ async function loadSignalLog() {
       el.innerHTML = '<div style="text-align:center;padding:12px;color:var(--dim)">판단 로그 없음 (봇 가동 후 표시)</div>';
       return;
     }
+    const reasonKo = {
+      stop_loss:'손절', take_profit:'익절', trailing_stop:'트레일링',
+      early_tp:'조기익절', mean_revert_done:'평균회귀', tp_extended:'TP연장',
+      trend_reversal_htf:'HTF추세반전', trend_reversal_1m:'1m추세반전',
+      max_hold:'보유한도초과', flip:'방향전환',
+      low_score:'점수미달', no_direction:'방향없음', no_pattern:'패턴없음',
+      fee_not_covered:'수수료미달', insufficient_htf:'HTF부족',
+      hold:'유지중', hold_position:'유지중',
+    };
     el.innerHTML = signals.map(s => {
       const meta = s.metadata || {};
-      const confW = Math.max(4, Math.min(60, s.confidence * 60));
+      const reason = meta.reason || '';
+      const reasonLabel = reasonKo[reason] || reason || s.signal_type;
       const metaItems = [];
-      if (meta.score !== undefined) metaItems.push(`score:${meta.score}`);
+      if (meta.score !== undefined && meta.max_score !== undefined) metaItems.push(`${meta.score}/${meta.max_score}점`);
+      else if (meta.score !== undefined) metaItems.push(`${meta.score}점`);
       if (meta.rsi !== undefined) metaItems.push(`RSI:${Number(meta.rsi).toFixed(0)}`);
       if (meta.atr !== undefined) metaItems.push(`ATR:${Number(meta.atr).toFixed(2)}`);
       if (meta.pattern) metaItems.push(meta.pattern);
       if (meta.market) metaItems.push(meta.market);
       if (meta.direction) metaItems.push(meta.direction);
-      if (meta.reason && s.signal_type === 'HOLD') metaItems.push(meta.reason);
       if (meta.entry_type) metaItems.push(meta.entry_type);
+      if (meta.net_pct !== undefined) metaItems.push(`${meta.net_pct>0?'+':''}${meta.net_pct}%`);
+      if (meta.ticks_held !== undefined) metaItems.push(`${meta.ticks_held}틱`);
       const metaStr = metaItems.slice(0, 5).join(' · ');
       const time = s.recorded_at ? new Date(s.recorded_at).toLocaleTimeString('ko',{hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
       const label = (strategiesCache.find(x=>x.name===s.strategy)||{}).label || s.strategy;
@@ -1063,8 +1075,7 @@ async function loadSignalLog() {
               <span style="color:var(--dim);font-size:10px;margin-left:4px;">${label}</span>
             </div>
             <div style="display:flex;align-items:center;gap:4px;">
-              <span class="confidence-bar" style="width:${confW}px;"></span>
-              <span style="font-size:10px;">${(s.confidence*100).toFixed(0)}%</span>
+              <span style="font-size:10px;font-weight:600;color:${s.signal_type==='HOLD'?'var(--dim)':s.signal_type==='CLOSE'?'var(--loss)':'var(--profit)'};">${reasonLabel}</span>
               <span style="font-size:10px;color:var(--dim);">${time}</span>
             </div>
           </div>

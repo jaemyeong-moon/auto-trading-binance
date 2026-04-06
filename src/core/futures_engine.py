@@ -307,7 +307,7 @@ class FuturesEngine:
     async def _fetch_candles(self, symbol: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         """15분봉(메인) + 1시간봉(HTF) 매 틱."""
         candles_15m = await self.client.get_candles(symbol, interval="15m", limit=200)
-        htf_candles = await self.client.get_candles(symbol, interval="1h", limit=100)
+        htf_candles = await self.client.get_candles(symbol, interval="1h", limit=250)
         return candles_15m, htf_candles
 
     def _record_trail(self, symbol: str, pos: dict, price: float) -> None:
