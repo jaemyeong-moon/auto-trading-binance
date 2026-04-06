@@ -172,7 +172,18 @@ class BotSettings(Base):
     value = Column(String, nullable=False)
 
 
+def _set_sqlite_pragmas(dbapi_conn, _connection_record):
+    """SQLite WAL 모드 + busy_timeout 설정 — 다중 프로세스 접근 시 잠금 방지."""
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.close()
+
+
+from sqlalchemy import event as _sa_event  # noqa: E402
+
 engine = create_engine(DB_URL, echo=False)
+_sa_event.listen(engine, "connect", _set_sqlite_pragmas)
 SessionLocal = sessionmaker(bind=engine)
 
 
