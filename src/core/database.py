@@ -1,5 +1,6 @@
 """Database setup and trade/position persistence using SQLAlchemy."""
 
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -134,6 +135,20 @@ class PositionTrail(Base):
     tp_price = Column(Float, nullable=False)
     price = Column(Float, nullable=False)              # 해당 틱의 현재가
     progress_pct = Column(Float, nullable=False)       # 0=SL, 100=TP
+    recorded_at = Column(DateTime, default=now_kst)
+
+
+class SignalLog(Base):
+    """매 틱 전략 평가 결과 기록."""
+    __tablename__ = "signal_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String, nullable=False)
+    strategy = Column(String, nullable=False)
+    signal_type = Column(String, nullable=False)       # BUY, SELL, HOLD, CLOSE
+    confidence = Column(Float, nullable=False)
+    metadata_json = Column(String, nullable=True)      # JSON string
+    source = Column(String, default="real")             # "real" or "paper"
     recorded_at = Column(DateTime, default=now_kst)
 
 
@@ -439,3 +454,67 @@ def get_trail(trade_type: str, trade_id: int) -> list[dict]:
             "price": r.price,
             "pct": r.progress_pct,
         } for r in rows]
+
+
+# ─── Signal Log helpers ──────────────────────────────────
+
+_SIGNAL_LOG_MAX = 500
+
+
+def log_signal(
+    symbol: str, strategy: str, signal_type: str,
+    confidence: float, metadata: dict | None = None,
+    source: str = "real",
+) -> None:
+    """전략 평가 결과를 DB에 기록. 500건 초과 시 오래된 것부터 삭제."""
+    meta_str = json.dumps(metadata, default=str) if metadata else None
+    with get_session() as session:
+        session.add(SignalLog(
+            symbol=symbol, strategy=strategy, signal_type=signal_type,
+            confidence=round(confidence, 4), metadata_json=meta_str,
+            source=source,
+        ))
+        # 링버퍼: 500건 초과 시 오래된 것 삭제
+        count = session.query(SignalLog).count()
+        if count > _SIGNAL_LOG_MAX:
+            excess = count - _SIGNAL_LOG_MAX
+            old_ids = [r.id for r in session.query(SignalLog.id)
+                       .order_by(SignalLog.recorded_at.asc())
+                       .limit(excess).all()]
+            if old_ids:
+                session.query(SignalLog).filter(
+                    SignalLog.id.in_(old_ids)).delete(synchronize_session=False)
+        session.commit()
+
+
+def get_recent_signals(
+    symbol: str | None = None, limit: int = 20, source: str | None = None,
+) -> list[dict]:
+    """최근 전략 판단 로그 조회."""
+    with get_session() as session:
+        q = session.query(SignalLog).order_by(SignalLog.recorded_at.desc())
+        if symbol:
+            q = q.filter_by(symbol=symbol)
+        if source:
+            q = q.filter_by(source=source)
+        rows = q.limit(limit).all()
+        return [{
+            "id": r.id,
+            "symbol": r.symbol,
+            "strategy": r.strategy,
+            "signal_type": r.signal_type,
+            "confidence": r.confidence,
+            "metadata": json.loads(r.metadata_json) if r.metadata_json else {},
+            "source": r.source,
+            "recorded_at": r.recorded_at.isoformat() if r.recorded_at else "",
+        } for r in rows]
+
+
+# ─── Settings hash (핫리로드 감지용) ─────────────────────
+
+def get_settings_hash() -> str:
+    """현재 설정의 해시값 반환 — 변경 감지용."""
+    import hashlib
+    settings = get_all_settings()
+    raw = json.dumps(settings, sort_keys=True)
+    return hashlib.md5(raw.encode()).hexdigest()

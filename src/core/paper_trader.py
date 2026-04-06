@@ -114,6 +114,16 @@ class PaperTrader:
             # ── 포지션 없으면 진입 평가 ──
             if not pos:
                 signal = strategy.evaluate(symbol, candles, htf)
+                try:
+                    db.log_signal(
+                        symbol=symbol, strategy=name,
+                        signal_type=signal.type.value,
+                        confidence=signal.confidence,
+                        metadata=signal.metadata,
+                        source="paper",
+                    )
+                except Exception:
+                    pass
                 if signal.type in (SignalType.BUY, SignalType.SELL):
                     self._open(session, name, strategy, symbol, signal, price, atr)
 

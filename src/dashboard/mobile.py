@@ -143,6 +143,10 @@ async def api_status(request: Request):
                 "tp_pct": settings.get("tp_pct", "0.01"),
                 "sl_pct": settings.get("sl_pct", "0.005"),
                 "tick_interval": settings.get("tick_interval", "15"),
+                "auto_sl_mult": settings.get("auto_sl_mult", "1.0"),
+                "auto_tp_mult": settings.get("auto_tp_mult", "2.0"),
+                "auto_trail_act_mult": settings.get("auto_trail_act_mult", "1.5"),
+                "auto_trail_dist_mult": settings.get("auto_trail_dist_mult", "0.5"),
             },
         })
     except Exception as e:
@@ -278,6 +282,14 @@ async def api_paper_trade_trail(request: Request, trade_id: int):
     return JSONResponse(db.get_trail("paper", trade_id))
 
 
+@app.get("/api/signals")
+async def api_signals(request: Request, symbol: str | None = None, limit: int = 20, source: str | None = None):
+    """최근 전략 판단 로그 조회."""
+    if err := _auth_guard(request): return err
+    signals = db.get_recent_signals(symbol=symbol, limit=limit, source=source)
+    return JSONResponse(signals)
+
+
 @app.get("/api/strategies")
 async def api_strategies(request: Request):
     if err := _auth_guard(request): return err
@@ -303,9 +315,18 @@ async def api_bot_stop(request: Request, symbol: str):
 async def api_settings_save(request: Request):
     if err := _auth_guard(request): return err
     body = await request.json()
+    old_strategy = db.get_setting("strategy")
     for key, value in body.items():
         db.set_setting(key, str(value))
-    return JSONResponse({"ok": True})
+    new_strategy = body.get("strategy", old_strategy)
+    strategy_changed = str(new_strategy) != old_strategy
+    return JSONResponse({
+        "ok": True,
+        "strategy_changed": strategy_changed,
+        "message": "설정이 적용되었습니다. 봇이 다음 틱에서 자동 반영합니다."
+            if not strategy_changed
+            else "전략이 변경되었습니다. 봇이 자동으로 새 전략으로 전환합니다.",
+    })
 
 
 @app.get("/api/trade/{trade_id}/chart")
@@ -617,6 +638,22 @@ body {
 
 /* Pull to refresh hint */
 .pull-hint { text-align: center; font-size: 12px; color: var(--dim); padding: 8px; }
+
+/* Signal log */
+.signal-item { padding:6px 0; font-size:12px; }
+.signal-item + .signal-item { border-top:1px solid var(--border); }
+.signal-badge { display:inline-block; padding:1px 6px; border-radius:4px; font-size:10px; font-weight:700; }
+.signal-badge.BUY { background:rgba(0,212,170,0.2); color:var(--green); }
+.signal-badge.SELL { background:rgba(239,83,80,0.2); color:var(--red); }
+.signal-badge.HOLD { background:rgba(136,136,136,0.2); color:var(--dim); }
+.signal-badge.CLOSE { background:rgba(255,167,38,0.2); color:var(--orange); }
+.confidence-bar { display:inline-block; height:6px; border-radius:3px; background:var(--accent); vertical-align:middle; }
+.signal-meta { font-size:10px; color:var(--dim); margin-top:2px; }
+
+/* Filter buttons */
+.filter-btn { background:var(--bg); border:1px solid var(--border); color:var(--dim); padding:4px 10px;
+  border-radius:6px; font-size:11px; cursor:pointer; }
+.filter-btn.active { background:var(--accent); color:white; border-color:var(--accent); }
 </style>
 </head>
 <body>
@@ -662,6 +699,10 @@ body {
     <div id="chartContainer" style="width:100%;height:350px;border-radius:8px;overflow:hidden;"></div>
   </div>
   <div class="card">
+    <div class="card-title">전략 판단 로그</div>
+    <div id="signalLogList" style="max-height:280px;overflow-y:auto;"><div class="loading"><div class="spinner"></div></div></div>
+  </div>
+  <div class="card">
     <div class="card-title">실거래 내역</div>
     <div id="recentTrades"><div class="loading"><div class="spinner"></div></div></div>
   </div>
@@ -689,6 +730,10 @@ body {
     <div id="paperStrategyList"><div class="loading"><div class="spinner"></div></div></div>
   </div>
   <div class="card">
+    <div class="card-title">실거래 성과 요약</div>
+    <div id="realTradeStats" class="metrics cols-3"></div>
+  </div>
+  <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
       <div class="card-title" style="margin:0;">차트</div>
       <select id="tradeChartSymbol" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px;">
@@ -703,7 +748,14 @@ body {
     <div id="tradeChartContainer" style="width:100%;height:300px;border-radius:8px;overflow:hidden;display:none;"></div>
   </div>
   <div class="card">
-    <div class="card-title">최근 거래 내역</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <div class="card-title" style="margin:0;">최근 거래 내역</div>
+      <div id="tradeFilters" style="display:flex;gap:4px;">
+        <button class="filter-btn active" data-filter="all" onclick="filterTrades('all',this)">전체</button>
+        <button class="filter-btn" data-filter="win" onclick="filterTrades('win',this)">승</button>
+        <button class="filter-btn" data-filter="loss" onclick="filterTrades('loss',this)">패</button>
+      </div>
+    </div>
     <div id="tradeList"><div class="loading"><div class="spinner"></div></div></div>
   </div>
 </div>
@@ -745,8 +797,27 @@ body {
       <label>분석 주기 (초)</label>
       <input type="number" id="sTick" min="5" max="120" step="5">
     </div>
+  </div>
+  <div class="card">
+    <div class="card-title">ATR 기반 SL/TP 배수</div>
+    <div class="setting-row">
+      <label>SL 배수 (ATR x)</label>
+      <input type="number" id="sSlMult" min="0.5" max="20" step="0.5">
+    </div>
+    <div class="setting-row">
+      <label>TP 배수 (ATR x)</label>
+      <input type="number" id="sTpMult" min="0.5" max="30" step="0.5">
+    </div>
+    <div class="setting-row">
+      <label>트레일링 활성화 배수 (ATR x)</label>
+      <input type="number" id="sTrailAct" min="0.5" max="20" step="0.5">
+    </div>
+    <div class="setting-row">
+      <label>트레일링 거리 배수 (ATR x)</label>
+      <input type="number" id="sTrailDist" min="0.1" max="10" step="0.1">
+    </div>
     <button class="btn-primary" onclick="saveSettings()">설정 저장</button>
-    <div style="font-size:11px;color:var(--dim);margin-top:8px;text-align:center;">전략 변경 시 봇 재시작 필요</div>
+    <div id="saveMsg" style="font-size:12px;color:var(--green);margin-top:8px;text-align:center;display:none;"></div>
   </div>
 </div>
 
@@ -929,7 +1000,8 @@ function renderStatus(d) {
   document.getElementById('positionList').innerHTML =
     posHtml.length ? posHtml.join('') : '<div style="text-align:center;padding:16px;color:var(--dim)">포지션 없음</div>';
 
-  // Recent trades (last 5)
+  // Signal log + Recent trades
+  loadSignalLog();
   loadRecentTrades();
 
   // Bot grid
@@ -954,6 +1026,52 @@ function renderStatus(d) {
 
   // Chart — 현황 탭은 lightweight-charts + 실거래 포지션 마커
   loadChart();
+}
+
+// ─── Signal Log ─────────────────────────────
+async function loadSignalLog() {
+  try {
+    const r = await authFetch('/api/signals?limit=15&source=real');
+    if (!r) return;
+    const signals = await r.json();
+    const el = document.getElementById('signalLogList');
+    if (!signals.length) {
+      el.innerHTML = '<div style="text-align:center;padding:12px;color:var(--dim)">판단 로그 없음 (봇 가동 후 표시)</div>';
+      return;
+    }
+    el.innerHTML = signals.map(s => {
+      const meta = s.metadata || {};
+      const confW = Math.max(4, Math.min(60, s.confidence * 60));
+      const metaItems = [];
+      if (meta.score !== undefined) metaItems.push(`score:${meta.score}`);
+      if (meta.rsi !== undefined) metaItems.push(`RSI:${Number(meta.rsi).toFixed(0)}`);
+      if (meta.atr !== undefined) metaItems.push(`ATR:${Number(meta.atr).toFixed(2)}`);
+      if (meta.pattern) metaItems.push(meta.pattern);
+      if (meta.market) metaItems.push(meta.market);
+      if (meta.direction) metaItems.push(meta.direction);
+      if (meta.reason && s.signal_type === 'HOLD') metaItems.push(meta.reason);
+      if (meta.entry_type) metaItems.push(meta.entry_type);
+      const metaStr = metaItems.slice(0, 5).join(' · ');
+      const time = s.recorded_at ? new Date(s.recorded_at).toLocaleTimeString('ko',{hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
+      const label = (strategiesCache.find(x=>x.name===s.strategy)||{}).label || s.strategy;
+      return `
+        <div class="signal-item">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div>
+              <span class="signal-badge ${s.signal_type}">${s.signal_type}</span>
+              <span style="margin-left:4px;font-weight:600;">${s.symbol.replace('USDT','')}</span>
+              <span style="color:var(--dim);font-size:10px;margin-left:4px;">${label}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:4px;">
+              <span class="confidence-bar" style="width:${confW}px;"></span>
+              <span style="font-size:10px;">${(s.confidence*100).toFixed(0)}%</span>
+              <span style="font-size:10px;color:var(--dim);">${time}</span>
+            </div>
+          </div>
+          ${metaStr ? '<div class="signal-meta">'+metaStr+'</div>' : ''}
+        </div>`;
+    }).join('');
+  } catch(e) { console.error('loadSignalLog:', e); }
 }
 
 async function loadRecentTrades() {
@@ -1025,8 +1143,69 @@ async function toggleBot(symbol, start) {
   loadStatus();
 }
 
+// ─── Trade Filters ──────────────────────────
+let _allPaperTrades = [];
+function filterTrades(filter, btn) {
+  document.querySelectorAll('#tradeFilters .filter-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  const el = document.getElementById('tradeList');
+  let filtered = _allPaperTrades;
+  if (filter === 'win') filtered = _allPaperTrades.filter(t => t.pnl >= 0);
+  else if (filter === 'loss') filtered = _allPaperTrades.filter(t => t.pnl < 0);
+  renderPaperTradeList(filtered);
+}
+
+function renderPaperTradeList(trades) {
+  const el = document.getElementById('tradeList');
+  if (!trades.length) { el.innerHTML = '<div style="text-align:center;padding:16px;color:var(--dim)">거래 없음</div>'; return; }
+  el.innerHTML = trades.map(t => {
+    const trail = t._trail || [];
+    const bar = buildSltpBar(t.side, t.entry, t.exit, t.sl, t.tp, t.pnl, trail);
+    return `
+    <div class="trade-item" onclick="openTradeChart(${t.id},'paper')" style="cursor:pointer;">
+      <div class="trade-row">
+        <div class="trade-info">
+          <div class="trade-sym">${t.symbol.replace('USDT','')} <span class="pos-side ${t.side==='BUY'||t.side==='LONG'?'long':'short'}" style="font-size:10px">${t.side}</span>
+            <span style="font-size:10px;color:var(--accent);margin-left:4px;">${(strategiesCache.find(x=>x.name===t.strategy)||{}).label||t.strategy}</span>
+            ${t.reason ? '<span style="font-size:10px;color:var(--dim);margin-left:2px;">'+t.reason+'</span>' : ''}
+          </div>
+          <div class="trade-meta">${fmt(t.entry)} → ${fmt(t.exit)} · ${t.closed_at ? new Date(t.closed_at).toLocaleString('ko',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : ''}</div>
+        </div>
+        <div>
+          <div class="trade-pnl ${cls(t.pnl)}">${fmt(t.pnl)}</div>
+        </div>
+      </div>
+      ${bar}
+    </div>`;
+  }).join('');
+}
+
 // ─── Trades ──────────────────────────────────
 async function loadTrades() {
+  // 0) 실거래 성과 요약
+  try {
+    const rt = await authFetch('/api/trades?limit=200');
+    if (rt) {
+      const realTrades = await rt.json();
+      const wins = realTrades.filter(t => (t.net_pnl||0) >= 0).length;
+      const losses = realTrades.filter(t => (t.net_pnl||0) < 0).length;
+      const totalPnl = realTrades.reduce((s,t) => s + (t.net_pnl||0), 0);
+      const winRate = realTrades.length > 0 ? (wins/realTrades.length*100).toFixed(1) : '0';
+      const pf = losses > 0 ? (
+        realTrades.filter(t=>(t.net_pnl||0)>=0).reduce((s,t)=>s+(t.net_pnl||0),0) /
+        Math.abs(realTrades.filter(t=>(t.net_pnl||0)<0).reduce((s,t)=>s+(t.net_pnl||0),0)) || 0
+      ).toFixed(2) : '-';
+      document.getElementById('realTradeStats').innerHTML = `
+        <div class="metric sm"><div class="value">${realTrades.length}</div><div class="label">총 거래</div></div>
+        <div class="metric sm"><div class="value">${winRate}%</div><div class="label">승률</div></div>
+        <div class="metric sm"><div class="value ${cls(totalPnl)}">${fmt(totalPnl)}</div><div class="label">총 손익</div></div>
+        <div class="metric sm"><div class="value">${wins}W</div><div class="label">승</div></div>
+        <div class="metric sm"><div class="value">${losses}L</div><div class="label">패</div></div>
+        <div class="metric sm"><div class="value">${pf}</div><div class="label">PF</div></div>
+      `;
+    }
+  } catch(e) { console.error('realTradeStats:', e); }
+
   // 1) 전략별 성과 요약
   try {
     const r = await authFetch('/api/paper');
@@ -1068,7 +1247,7 @@ async function loadTrades() {
     }
   } catch(e) { console.error('loadTrades paper:', e); }
 
-  // 2) 최근 거래 내역
+  // 2) 최근 거래 내역 (필터 지원)
   try {
     const r2 = await authFetch('/api/paper/trades?limit=30');
     if (!r2) return;
@@ -1088,26 +1267,9 @@ async function loadTrades() {
       } catch(e) {}
     }));
 
-    document.getElementById('tradeList').innerHTML = trades.map(t => {
-      const trail = paperTrailMap[t.id] || [];
-      const bar = buildSltpBar(t.side, t.entry, t.exit, t.sl, t.tp, t.pnl, trail);
-      return `
-      <div class="trade-item" onclick="openTradeChart(${t.id},'paper')" style="cursor:pointer;">
-        <div class="trade-row">
-          <div class="trade-info">
-            <div class="trade-sym">${t.symbol.replace('USDT','')} <span class="pos-side ${t.side==='BUY'||t.side==='LONG'?'long':'short'}" style="font-size:10px">${t.side}</span>
-              <span style="font-size:10px;color:var(--accent);margin-left:4px;">${(strategiesCache.find(x=>x.name===t.strategy)||{}).label||t.strategy}</span>
-              ${t.reason ? '<span style="font-size:10px;color:var(--dim);margin-left:2px;">'+t.reason+'</span>' : ''}
-            </div>
-            <div class="trade-meta">${fmt(t.entry)} → ${fmt(t.exit)} · ${t.closed_at ? new Date(t.closed_at).toLocaleString('ko',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : ''}</div>
-          </div>
-          <div>
-            <div class="trade-pnl ${cls(t.pnl)}">${fmt(t.pnl)}</div>
-          </div>
-        </div>
-        ${bar}
-      </div>`;
-    }).join('');
+    trades.forEach(t => { t._trail = paperTrailMap[t.id] || []; });
+    _allPaperTrades = trades;
+    renderPaperTradeList(trades);
   } catch(e) { console.error('loadTrades list:', e); }
 }
 
@@ -1456,6 +1618,10 @@ async function loadSettingsForm() {
     document.getElementById('sTp').value = (parseFloat(s.tp_pct) * 100).toFixed(1);
     document.getElementById('sSl').value = (parseFloat(s.sl_pct) * 100).toFixed(1);
     document.getElementById('sTick').value = s.tick_interval;
+    document.getElementById('sSlMult').value = s.auto_sl_mult || '1.0';
+    document.getElementById('sTpMult').value = s.auto_tp_mult || '2.0';
+    document.getElementById('sTrailAct').value = s.auto_trail_act_mult || '1.5';
+    document.getElementById('sTrailDist').value = s.auto_trail_dist_mult || '0.5';
   }
 
   // Strategy description on change
@@ -1474,9 +1640,24 @@ async function saveSettings() {
     tp_pct: String(Number(document.getElementById('sTp').value)/100),
     sl_pct: String(Number(document.getElementById('sSl').value)/100),
     tick_interval: document.getElementById('sTick').value,
+    auto_sl_mult: document.getElementById('sSlMult').value,
+    auto_tp_mult: document.getElementById('sTpMult').value,
+    auto_trail_act_mult: document.getElementById('sTrailAct').value,
+    auto_trail_dist_mult: document.getElementById('sTrailDist').value,
   };
-  await authFetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-  alert('설정 저장 완료. 전략 변경 시 봇을 재시작하세요.');
+  const r = await authFetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  if (r) {
+    const d = await r.json();
+    const msgEl = document.getElementById('saveMsg');
+    msgEl.textContent = d.message || '설정 저장 완료';
+    msgEl.style.display = 'block';
+    if (d.strategy_changed) {
+      msgEl.style.color = 'var(--orange)';
+    } else {
+      msgEl.style.color = 'var(--green)';
+    }
+    setTimeout(() => { msgEl.style.display = 'none'; }, 4000);
+  }
   loadStatus();
 }
 

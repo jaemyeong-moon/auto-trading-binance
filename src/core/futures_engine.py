@@ -34,6 +34,9 @@ class FuturesEngine:
             or os.environ.get("OPENAI_API_KEY")
             or os.environ.get("GEMINI_API_KEY")
         )
+        self._settings_hash = db.get_settings_hash()
+        self._current_strategy_name: dict[str, str] = {}
+        self._restart_status: dict[str, str] = {}  # symbol -> "restarting" | ""
 
     async def start_symbol(self, symbol: str) -> None:
         if symbol in self._tasks and not self._tasks[symbol].done():
@@ -42,6 +45,7 @@ class FuturesEngine:
         strategy_name = db.get_setting("strategy")
         strategy = get_strategy(strategy_name)
         self.strategies[symbol] = strategy
+        self._current_strategy_name[symbol] = strategy_name
 
         # 전략이 자체 레버리지를 가지면 사용 (v6+)
         from src.strategies import aggressive_scalper as _as
@@ -90,6 +94,10 @@ class FuturesEngine:
                 # AI Agent: 주기적으로 전략 성과 분석 및 신규 전략 생성
                 if self._ai_agent_enabled and tick_count % AI_AGENT_INTERVAL_TICKS == 1:
                     await self._run_ai_agent(symbol)
+
+                # ── 설정 핫리로드 + 전략 자동 재시작 ──
+                if tick_count % 3 == 0:
+                    strategy = await self._check_hot_reload(symbol, strategy)
 
                 if strategy.mode == ExecutionMode.ALWAYS_FLIP:
                     await self._tick_always_flip(symbol, strategy)
@@ -234,6 +242,68 @@ class FuturesEngine:
     #  Mode 1: Always Flip (v1)
     # ═══════════════════════════════════════════════════════
 
+    async def _check_hot_reload(self, symbol: str, strategy: Strategy) -> Strategy:
+        """설정 변경 감지 → 핫리로드. 전략 변경 시 graceful restart."""
+        try:
+            new_hash = db.get_settings_hash()
+            if new_hash == self._settings_hash:
+                return strategy
+
+            self._settings_hash = new_hash
+            logger.info("engine.settings_reloaded", symbol=symbol)
+
+            # 전략 변경 감지
+            new_strategy_name = db.get_setting("strategy")
+            old_strategy_name = self._current_strategy_name.get(symbol, "")
+
+            if new_strategy_name != old_strategy_name:
+                self._restart_status[symbol] = "restarting"
+                logger.info("engine.strategy_switch",
+                            symbol=symbol, old=old_strategy_name,
+                            new=new_strategy_name)
+
+                new_strategy = get_strategy(new_strategy_name)
+                self.strategies[symbol] = new_strategy
+                self._current_strategy_name[symbol] = new_strategy_name
+
+                # 레버리지 재설정
+                from src.strategies import aggressive_scalper as _as
+                leverage = getattr(_as, "LEVERAGE", db.get_setting_int("leverage"))
+                await self.client.set_leverage(symbol, leverage)
+
+                self._restart_status[symbol] = ""
+                logger.info("engine.strategy_switched",
+                            symbol=symbol, strategy=new_strategy_name)
+                return new_strategy
+
+            # 레버리지만 변경된 경우
+            from src.strategies import aggressive_scalper as _as
+            leverage = getattr(_as, "LEVERAGE", db.get_setting_int("leverage"))
+            await self.client.set_leverage(symbol, leverage)
+
+        except Exception:
+            logger.exception("engine.hot_reload_failed", symbol=symbol)
+            self._restart_status[symbol] = ""
+        return strategy
+
+    def _log_signal(self, symbol: str, signal, source: str = "real") -> None:
+        """전략 평가 결과를 DB에 기록."""
+        try:
+            db.log_signal(
+                symbol=symbol,
+                strategy=signal.source or db.get_setting("strategy"),
+                signal_type=signal.type.value,
+                confidence=signal.confidence,
+                metadata=signal.metadata,
+                source=source,
+            )
+        except Exception:
+            pass  # 로깅 실패가 거래에 영향 주면 안 됨
+
+    def get_restart_status(self) -> dict[str, str]:
+        """각 심볼의 재시작 상태 반환."""
+        return dict(self._restart_status)
+
     async def _fetch_candles(self, symbol: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         """15분봉(메인) + 1시간봉(HTF) 매 틱."""
         candles_15m = await self.client.get_candles(symbol, interval="15m", limit=200)
@@ -301,6 +371,8 @@ class FuturesEngine:
                 return
 
         signal = strategy.evaluate(symbol, candles, htf)
+        self._log_signal(symbol, signal)
+
         if signal.type == SignalType.HOLD:
             return
 
@@ -337,6 +409,7 @@ class FuturesEngine:
 
         # ── 전략 평가 (1분봉 + 15분봉) ──
         signal = strategy.evaluate(symbol, candles, htf)
+        self._log_signal(symbol, signal)
 
         if signal.type == SignalType.CLOSE and pos:
             close_reason = signal.metadata.get("reason", "signal")
