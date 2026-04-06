@@ -120,6 +120,23 @@ class PaperTrade(Base):
     closed_at = Column(DateTime, nullable=True)
 
 
+class PositionTrail(Base):
+    """포지션 생존 중 매 틱 가격 위치 궤적."""
+    __tablename__ = "position_trails"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_type = Column(String, nullable=False)       # "real" or "paper"
+    trade_id = Column(Integer, nullable=True)          # 청산 후 TradeRecord/PaperTrade id 연결
+    symbol = Column(String, nullable=False)
+    strategy = Column(String, nullable=True)           # paper용
+    entry_price = Column(Float, nullable=False)
+    sl_price = Column(Float, nullable=False)
+    tp_price = Column(Float, nullable=False)
+    price = Column(Float, nullable=False)              # 해당 틱의 현재가
+    progress_pct = Column(Float, nullable=False)       # 0=SL, 100=TP
+    recorded_at = Column(DateTime, default=now_kst)
+
+
 class BotState(Base):
     """Tracks which symbols have an active bot."""
     __tablename__ = "bot_state"
@@ -361,3 +378,64 @@ def get_all_settings() -> dict[str, str]:
         for r in rows:
             result[r.key] = r.value
     return result
+
+
+# ─── Position Trail helpers ───────────────────────────────
+
+def _calc_progress_pct(side: str, price: float, sl: float, tp: float) -> float:
+    """SL=0%, TP=100% 기준 현재가 위치. LONG/SHORT 방향 무관하게 동일."""
+    if side == "LONG":
+        rng = tp - sl
+        if rng <= 0:
+            return 50.0
+        return max(0.0, min(100.0, (price - sl) / rng * 100))
+    else:
+        rng = sl - tp
+        if rng <= 0:
+            return 50.0
+        return max(0.0, min(100.0, (sl - price) / rng * 100))
+
+
+def record_trail(
+    trade_type: str, symbol: str, side: str,
+    entry_price: float, sl_price: float, tp_price: float,
+    price: float, strategy: str = "",
+) -> None:
+    """매 틱 포지션 궤적 기록."""
+    pct = _calc_progress_pct(side, price, sl_price, tp_price)
+    with get_session() as session:
+        session.add(PositionTrail(
+            trade_type=trade_type, symbol=symbol, strategy=strategy or None,
+            entry_price=entry_price, sl_price=sl_price, tp_price=tp_price,
+            price=price, progress_pct=round(pct, 2),
+        ))
+        session.commit()
+
+
+def link_trails_to_trade(
+    trade_type: str, trade_id: int, symbol: str,
+    entry_price: float, strategy: str = "",
+) -> None:
+    """포지션 청산 시, 해당 포지션의 trail 레코드에 trade_id 연결."""
+    with get_session() as session:
+        q = session.query(PositionTrail).filter_by(
+            trade_type=trade_type, symbol=symbol,
+            entry_price=entry_price, trade_id=None,
+        )
+        if strategy:
+            q = q.filter_by(strategy=strategy)
+        q.update({"trade_id": trade_id})
+        session.commit()
+
+
+def get_trail(trade_type: str, trade_id: int) -> list[dict]:
+    """거래 ID로 궤적 조회."""
+    with get_session() as session:
+        rows = session.query(PositionTrail).filter_by(
+            trade_type=trade_type, trade_id=trade_id,
+        ).order_by(PositionTrail.recorded_at.asc()).all()
+        return [{
+            "time": r.recorded_at.isoformat() if r.recorded_at else "",
+            "price": r.price,
+            "pct": r.progress_pct,
+        } for r in rows]

@@ -240,6 +240,21 @@ class FuturesEngine:
         htf_candles = await self.client.get_candles(symbol, interval="1h", limit=100)
         return candles_15m, htf_candles
 
+    def _record_trail(self, symbol: str, pos: dict, price: float) -> None:
+        """실거래 포지션 궤적 기록."""
+        db_pos = db.get_position(symbol)
+        if not db_pos or not db_pos.sl_price or not db_pos.tp_price:
+            return
+        try:
+            db.record_trail(
+                trade_type="real", symbol=symbol, side=pos["side"],
+                entry_price=pos["entry_price"],
+                sl_price=db_pos.sl_price, tp_price=db_pos.tp_price,
+                price=price,
+            )
+        except Exception:
+            logger.debug("engine.trail_record_failed", symbol=symbol)
+
     async def _tick_always_flip(self, symbol: str, strategy: Strategy) -> None:
         candles, htf = await self._fetch_candles(symbol)
         if candles.empty:
@@ -257,6 +272,10 @@ class FuturesEngine:
         else:
             tp_pct = db.get_setting_float("tp_pct")
             sl_pct = db.get_setting_float("sl_pct")
+
+        # 궤적 기록
+        if pos:
+            self._record_trail(symbol, pos, price)
 
         # TP/SL
         if pos:
@@ -305,6 +324,10 @@ class FuturesEngine:
 
         price = float(candles.iloc[-1]["close"])
         pos = await self.client.get_position(symbol)
+
+        # ── 궤적 기록 ──
+        if pos:
+            self._record_trail(symbol, pos, price)
 
         # ── 포지션 있을 때: 익절/손절/트레일링 관리 ──
         if pos:
@@ -619,6 +642,10 @@ class FuturesEngine:
         trade = db.close_position(symbol, exit_price=current_price, fee=fee, reason=reason)
         pnl = trade.pnl if trade else 0.0
         net_pnl = trade.net_pnl if trade else 0.0
+
+        # 궤적을 거래에 연결
+        if trade:
+            db.link_trails_to_trade("real", trade.id, symbol, entry_price)
 
         if db.get_setting("webhook_on_close") == "true":
             # 계좌 잔고 및 수익률 정보 포함

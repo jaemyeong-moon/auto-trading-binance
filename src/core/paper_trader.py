@@ -98,8 +98,15 @@ class PaperTrader:
                 if pd.isna(atr):
                     atr = 0.0
 
-            # ── 포지션 있으면 SL/TP 체크 ──
+            # ── 포지션 있으면 궤적 기록 + SL/TP 체크 ──
             if pos:
+                if pos.sl_price and pos.tp_price:
+                    db.record_trail(
+                        trade_type="paper", symbol=symbol, side=pos.side,
+                        entry_price=pos.entry_price,
+                        sl_price=pos.sl_price, tp_price=pos.tp_price,
+                        price=price, strategy=name,
+                    )
                 closed = self._check_exit(session, name, pos, price)
                 if closed:
                     return
@@ -151,6 +158,11 @@ class PaperTrader:
             reason=reason, opened_at=pos.opened_at, closed_at=now_kst(),
         )
         session.add(trade)
+        session.flush()  # trade.id 확보
+
+        # 궤적 연결
+        db.link_trails_to_trade(
+            "paper", trade.id, pos.symbol, pos.entry_price, strategy=name)
 
         # 잔고 업데이트
         bal = session.query(PaperBalance).filter_by(strategy=name).first()

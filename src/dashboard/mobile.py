@@ -264,6 +264,20 @@ async def api_paper_trades(request: Request, strategy: str | None = None, limit:
         } for t in trades])
 
 
+@app.get("/api/trade/{trade_id}/trail")
+async def api_trade_trail(request: Request, trade_id: int):
+    """실거래 포지션 궤적 조회."""
+    if err := _auth_guard(request): return err
+    return JSONResponse(db.get_trail("real", trade_id))
+
+
+@app.get("/api/paper/trade/{trade_id}/trail")
+async def api_paper_trade_trail(request: Request, trade_id: int):
+    """페이퍼 트레이드 포지션 궤적 조회."""
+    if err := _auth_guard(request): return err
+    return JSONResponse(db.get_trail("paper", trade_id))
+
+
 @app.get("/api/strategies")
 async def api_strategies(request: Request):
     if err := _auth_guard(request): return err
@@ -567,6 +581,8 @@ body {
 .sltp-bar .zone.profit { background:rgba(38,166,154,0.25); }
 .sltp-bar .entry-line { position:absolute; top:0; width:2px; height:100%; background:rgba(255,255,255,0.7); }
 .sltp-bar .exit-dot { position:absolute; top:3px; width:12px; height:12px; border-radius:50%; border:2px solid #fff; transform:translateX(-6px); }
+.sltp-bar .trail-dot { position:absolute; top:6px; width:4px; height:4px; border-radius:50%; background:rgba(255,255,255,0.5); transform:translateX(-2px); pointer-events:none; }
+.sltp-bar .trail-line { position:absolute; top:8px; height:2px; border-radius:1px; pointer-events:none; }
 .sltp-labels { display:flex; justify-content:space-between; font-size:9px; color:var(--dim); margin-top:1px; }
 
 /* Paper trading */
@@ -801,7 +817,7 @@ const pct = (n) => n!=null ? (n>=0?'+':'')+n.toFixed(2)+'%' : '-';
 const cls = (n) => n>=0 ? 'positive' : 'negative';
 
 // ─── SL/TP Progress Bar ─────────────────────
-function buildSltpBar(side, entry, exit, sl, tp, pnl) {
+function buildSltpBar(side, entry, exit, sl, tp, pnl, trail) {
   if (!sl || !tp || !entry || !exit) return '';
   const isLong = side === 'LONG' || side === 'BUY';
   const barMin = Math.min(sl, tp);
@@ -819,10 +835,35 @@ function buildSltpBar(side, entry, exit, sl, tp, pnl) {
   else { profitL=0; profitW=entryPct; lossL=entryPct; lossW=100-entryPct; }
   const slLabel = isLong ? `SL ${sl.toFixed(0)}` : `TP ${tp.toFixed(0)}`;
   const tpLabel = isLong ? `TP ${tp.toFixed(0)}` : `SL ${sl.toFixed(0)}`;
+
+  // trail dots + connecting line
+  let trailHtml = '';
+  if (trail && trail.length > 1) {
+    const pcts = trail.map(t => t.pct);
+    const minPct = Math.min(...pcts);
+    const maxPct = Math.max(...pcts);
+    // gradient line showing range traversed
+    const lineLeft = Math.max(0, minPct);
+    const lineRight = Math.min(100, maxPct);
+    const lineWidth = lineRight - lineLeft;
+    if (lineWidth > 0.5) {
+      trailHtml += `<div class="trail-line" style="left:${lineLeft}%;width:${lineWidth}%;background:linear-gradient(90deg,rgba(239,83,80,0.5),rgba(255,255,255,0.3),rgba(38,166,154,0.5))"></div>`;
+    }
+    // sample up to 20 dots evenly
+    const step = Math.max(1, Math.floor(trail.length / 20));
+    for (let i = 0; i < trail.length; i += step) {
+      const pt = trail[i];
+      const dotPct = Math.max(1, Math.min(99, pt.pct));
+      const alpha = 0.3 + (i / trail.length) * 0.5; // older=dim, newer=bright
+      trailHtml += `<div class="trail-dot" style="left:${dotPct}%;opacity:${alpha.toFixed(2)}"></div>`;
+    }
+  }
+
   return `
     <div class="sltp-bar">
       <div class="zone loss" style="left:${lossL}%;width:${lossW}%"></div>
       <div class="zone profit" style="left:${profitL}%;width:${profitW}%"></div>
+      ${trailHtml}
       <div class="entry-line" style="left:${entryPct}%"></div>
       <div class="exit-dot" style="left:${exitPct}%;background:${exitColor}"></div>
     </div>
@@ -925,8 +966,19 @@ async function loadRecentTrades() {
       '<div style="text-align:center;padding:16px;color:var(--dim)">실거래 내역 없음</div>';
     return;
   }
+
+  // trail 데이터 병렬 로드
+  const trailMap = {};
+  await Promise.all(trades.map(async t => {
+    try {
+      const tr = await authFetch(`/api/trade/${t.id}/trail`);
+      if (tr) trailMap[t.id] = await tr.json();
+    } catch(e) {}
+  }));
+
   document.getElementById('recentTrades').innerHTML = trades.map(t => {
-    const bar = buildSltpBar(t.side, t.entry, t.exit, t.sl_price, t.tp_price, t.net_pnl);
+    const trail = trailMap[t.id] || [];
+    const bar = buildSltpBar(t.side, t.entry, t.exit, t.sl_price, t.tp_price, t.net_pnl, trail);
     return `
     <div class="trade-item" onclick="openTradeChart(${t.id},'real')" style="cursor:pointer;">
       <div class="trade-row">
@@ -1026,8 +1078,19 @@ async function loadTrades() {
         '<div style="text-align:center;padding:16px;color:var(--dim)">거래 없음</div>';
       return;
     }
+
+    // trail 데이터 병렬 로드
+    const paperTrailMap = {};
+    await Promise.all(trades.map(async t => {
+      try {
+        const tr = await authFetch(`/api/paper/trade/${t.id}/trail`);
+        if (tr) paperTrailMap[t.id] = await tr.json();
+      } catch(e) {}
+    }));
+
     document.getElementById('tradeList').innerHTML = trades.map(t => {
-      const bar = buildSltpBar(t.side, t.entry, t.exit, t.sl, t.tp, t.pnl);
+      const trail = paperTrailMap[t.id] || [];
+      const bar = buildSltpBar(t.side, t.entry, t.exit, t.sl, t.tp, t.pnl, trail);
       return `
       <div class="trade-item" onclick="openTradeChart(${t.id},'paper')" style="cursor:pointer;">
         <div class="trade-row">
