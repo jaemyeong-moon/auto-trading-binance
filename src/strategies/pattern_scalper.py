@@ -35,6 +35,12 @@ class V12State:
     entry_atr: float = 0.0
     ticks_in_position: int = 0   # 포지션 보유 틱 수
     partial_tp_taken: bool = False  # 부분 익절 여부
+    # 엔진 _manage_exit_v2 호환 필드
+    highest_since_entry: float = 0.0
+    lowest_since_entry: float = float("inf")
+    trailing_stop_price: float | None = None
+    sl_price: float = 0.0
+    tp_price: float = 0.0
 
     cooldown_remaining: int = 0
     consecutive_losses: int = 0
@@ -50,6 +56,13 @@ class V12State:
             self.last_hour = hour
             self.trades_this_hour = 0
         return self.trades_this_hour < MAX_TRADES_PER_HOUR
+
+    def update_price(self, price: float) -> None:
+        """트레일링 스탑용 최고/최저가 갱신."""
+        if price > self.highest_since_entry:
+            self.highest_since_entry = price
+        if price < self.lowest_since_entry:
+            self.lowest_since_entry = price
 
 
 @register
@@ -220,6 +233,10 @@ class PatternScalper(Strategy):
         self.state.entry_price = price
         self.state.entry_atr = atr
         self.state.ticks_in_position = 0
+        self.state.partial_tp_taken = False
+        self.state.highest_since_entry = price
+        self.state.lowest_since_entry = price
+        self.state.trailing_stop_price = None
         self.state.trades_this_hour += 1
         self.state.last_pattern_name = best.name
 
