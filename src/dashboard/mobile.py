@@ -355,13 +355,27 @@ async def api_trade_chart(request: Request, trade_id: int, source: str = "real")
             }
 
         # 구간 캔들 조회 (opened_at ~ closed_at + 여유)
-        if not info["opened_at"] or not info["closed_at"]:
+        if not info["opened_at"]:
             return JSONResponse({"trade": info, "candles": []})
 
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
+        KST = timezone(timedelta(hours=9))
+
         opened = datetime.fromisoformat(info["opened_at"])
-        closed = datetime.fromisoformat(info["closed_at"])
-        duration = (closed - opened).total_seconds()
+        closed = datetime.fromisoformat(info["closed_at"]) if info["closed_at"] else opened
+
+        # DB 시간은 KST — timezone aware로 변환하여 UTC timestamp 계산
+        if opened.tzinfo is None:
+            opened = opened.replace(tzinfo=KST)
+            closed = closed.replace(tzinfo=KST)
+
+        duration = max((closed - opened).total_seconds(), 0)
+
+        # duration이 너무 짧으면 (동일 틱 내 청산) 전후 30분 표시
+        if duration < 120:
+            duration = 1800  # 30분
+            opened = opened - timedelta(seconds=900)
+            closed = closed + timedelta(seconds=900)
 
         # 캔들 간격: 포지션 보유 시간에 따라 자동 선택
         if duration < 3600:          # < 1h → 1m 캔들
@@ -371,7 +385,6 @@ async def api_trade_chart(request: Request, trade_id: int, source: str = "real")
         else:                        # >= 24h → 15m 캔들
             interval, limit = "15m", min(int(duration / 900) + 20, 500)
 
-        # 시작 시간 여유 (앞뒤 10% 추가)
         margin = timedelta(seconds=duration * 0.1 + 60)
         start_ms = int((opened - margin).timestamp() * 1000)
 
@@ -388,19 +401,16 @@ async def api_trade_chart(request: Request, trade_id: int, source: str = "real")
         if candles.empty:
             return JSONResponse({"trade": info, "candles": []})
 
-        # 시간 범위 필터링
+        # 캔들 데이터 변환 (필터링 없이 전부 반환 — start_time으로 이미 범위 지정됨)
         candle_data = []
-        end_ts = (closed + margin).timestamp()
-        start_ts = (opened - margin).timestamp()
         for idx, row in candles.iterrows():
             ts = row.name.timestamp() if hasattr(row.name, 'timestamp') else float(idx)
-            if start_ts <= ts <= end_ts:
-                candle_data.append({
-                    "time": int(ts),
-                    "open": float(row["open"]), "high": float(row["high"]),
-                    "low": float(row["low"]), "close": float(row["close"]),
-                    "volume": float(row["volume"]),
-                })
+            candle_data.append({
+                "time": int(ts),
+                "open": float(row["open"]), "high": float(row["high"]),
+                "low": float(row["low"]), "close": float(row["close"]),
+                "volume": float(row["volume"]),
+            })
 
         return JSONResponse({"trade": info, "candles": candle_data})
 
