@@ -333,32 +333,20 @@ def get_all_bot_states() -> dict[str, bool]:
 
 # ─── Settings helpers ─────────────────────────────────────
 
-# 기본값 정의
+# 기본값 정의 — SL/TP/레버리지/투자비율은 각 전략 클래스에서 정의
 _DEFAULT_SETTINGS = {
-    "strategy": "momentum_flip_scalper",  # 기본 전략
-    "position_size_pct": "0.1",     # 잔고 대비 투자 비율 (10%)
-    "leverage": "5",                 # 레버리지 배수
-    "tp_pct": "0.01",               # 익절 % (1%)
-    "sl_pct": "0.005",              # 손절 % (0.5%)
+    "strategy": "pattern_scalper",   # 활성 전략
     "tick_interval": "15",           # 분석 주기 (초)
-    # 자동 최적화 결과 (10분마다 갱신)
-    "auto_sl_mult": "1.0",
-    "auto_tp_mult": "2.0",
-    "auto_trail_act_mult": "1.5",
-    "auto_trail_dist_mult": "0.5",
-    "auto_opt_score": "0",
-    "auto_opt_trades": "0",
-    "auto_opt_winrate": "0",
     # 웹훅
-    "webhook_url": "",               # 빈 문자열이면 비활성화
-    "webhook_on_open": "true",       # 포지션 진입 시
-    "webhook_on_close": "true",      # 포지션 청산 시
-    "webhook_on_tp_sl": "true",      # 익절/손절 시
+    "webhook_url": "",
+    "webhook_on_open": "true",
+    "webhook_on_close": "true",
+    "webhook_on_tp_sl": "true",
     # AI Agent
-    "ai_agent_enabled": "true",      # AI 전략 에이전트 활성화
-    "ai_agent_interval": "120",      # 실행 주기 (틱 수, 기본 ~1시간)
-    "ai_agent_last_run": "",         # 마지막 실행 시각
-    "ai_agent_last_strategy": "",    # 마지막 생성 전략
+    "ai_agent_enabled": "true",
+    "ai_agent_interval": "120",
+    "ai_agent_last_run": "",
+    "ai_agent_last_strategy": "",
 }
 
 

@@ -57,9 +57,12 @@ class MomentumFlipScalper(Strategy):
     4. 3연패 시 → 신호를 반전 (역추세 모드)
     """
 
-    # ATR 기반 동적 SL/TP — 1:1 비율로 SL 편중 해소
-    SL_ATR_MULT = 2.5   # SL = 2.5 × ATR (노이즈 조기 손절 방지)
-    TP_ATR_MULT = 3.75  # TP = 3.75 × ATR (1:1.5 RR 보장)
+    # v1: ALWAYS_FLIP — 항상 포지션 보유, EMA 크로스로 방향 전환
+    LEVERAGE = 5
+    POSITION_SIZE_PCT = 0.15    # 보수적 (항상 포지션 보유이므로)
+    SL_ATR_MULT = 2.5           # SL = 2.5 × ATR
+    TP_ATR_MULT = 3.75          # TP = 3.75 × ATR (1:1.5 RR)
+    MAX_HOLD_HOURS = 0          # ALWAYS_FLIP은 시간제한 없음
 
     def __init__(self, ema_fast: int = 3, ema_slow: int = 8) -> None:
         self.ema_fast = ema_fast

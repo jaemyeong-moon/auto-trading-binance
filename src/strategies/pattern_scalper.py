@@ -60,9 +60,12 @@ class PatternScalper(Strategy):
     횡보장에서도 작동, ADX 필터 없음.
     """
 
-    SL_ATR_MULT = 2.5     # SL = 2.5 ATR (손실 크기 축소)
-    TP_ATR_MULT = 5.0     # TP = 5 ATR (1:2 RR)
-    MAX_HOLD_TICKS = 960  # 최대 보유 ~4시간 (15초틱 × 960 = 14400초)
+    # v12: 차트 패턴 기반 — 큰 움직임 포착, 넓은 SL/TP
+    LEVERAGE = 7
+    POSITION_SIZE_PCT = 0.25
+    SL_ATR_MULT = 2.5           # SL = 2.5 ATR
+    TP_ATR_MULT = 5.0           # TP = 5.0 ATR (1:2 RR)
+    MAX_HOLD_HOURS = 4.0        # 4시간 최대 보유
 
     def __init__(self) -> None:
         self.state = V12State()
@@ -283,8 +286,9 @@ class PatternScalper(Strategy):
             hit_sl = price >= sl_price
             hit_tp = price <= tp_price
 
-        # 최대 보유 시간 초과 → 시장가 청산
-        if self.state.ticks_in_position >= self.MAX_HOLD_TICKS:
+        # 최대 보유 시간 초과 → 시장가 청산 (tick_interval=15초 기준)
+        max_ticks = int(self.MAX_HOLD_HOURS * 3600 / 15) if self.MAX_HOLD_HOURS > 0 else 999999
+        if self.state.ticks_in_position >= max_ticks:
             return Signal(symbol=symbol, type=SignalType.CLOSE,
                           confidence=0.9, source=self.name,
                           metadata={"reason": "max_hold",

@@ -94,7 +94,11 @@ class ContrarianScalper(Strategy):
     과열/과매도 구간에서 평균회귀를 노린다.
     """
 
-    # 엔진 ATR SL/TP 비활성화 (자체 관리)
+    # v10: 역추세 평균회귀 — 자체 SL/TP 관리
+    LEVERAGE = 5
+    POSITION_SIZE_PCT = 0.15
+    MAX_HOLD_HOURS = 4.0
+    # 엔진 ATR SL/TP 비활성화 (자체 관리: SL=2ATR, TP=3ATR)
     SL_ATR_MULT = 99.0
     TP_ATR_MULT = 99.0
     PARTIAL_TP_ATR_MULT = 99.0

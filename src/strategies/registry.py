@@ -21,7 +21,7 @@ def get_strategy(name: str) -> Strategy:
 
 
 def list_strategies() -> list[dict]:
-    """대시보드 표시용 전략 목록."""
+    """대시보드 표시용 전략 목록 + 매매 파라미터."""
     result = []
     for name, cls in _REGISTRY.items():
         instance = cls()
@@ -30,6 +30,13 @@ def list_strategies() -> list[dict]:
             "label": instance.label,
             "description": instance.description,
             "mode": instance.mode.value,
+            "params": {
+                "leverage": getattr(instance, "LEVERAGE", 5),
+                "position_size_pct": getattr(instance, "POSITION_SIZE_PCT", 0.20),
+                "sl_atr_mult": getattr(instance, "SL_ATR_MULT", 0),
+                "tp_atr_mult": getattr(instance, "TP_ATR_MULT", 0),
+                "max_hold_hours": getattr(instance, "MAX_HOLD_HOURS", 0),
+            },
         })
     return result
 

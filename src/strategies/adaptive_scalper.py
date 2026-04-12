@@ -197,7 +197,14 @@ def compute_entry_score(df_1m: pd.DataFrame, df_htf: pd.DataFrame | None,
 class AdaptiveScalper(Strategy):
     """v2 멀티 타임프레임 적응형 스캘핑."""
 
-    SCORE_THRESHOLD = 4   # 6점 만점 중 4점 이상 (15분봉 추가로 기준 상향)
+    # v2: MarketState 기반 6점 스코어링 — 고정 % SL/TP
+    LEVERAGE = 5
+    POSITION_SIZE_PCT = 0.20
+    MAX_HOLD_HOURS = 4.0
+    SL_ATR_MULT = 0               # 고정 % 사용 (ATR 비활성)
+    TP_ATR_MULT = 0
+
+    SCORE_THRESHOLD = 4   # 6점 만점 중 4점 이상
     COOLDOWN_CANDLES = 4
 
     PARTIAL_TP_PCT = 0.005

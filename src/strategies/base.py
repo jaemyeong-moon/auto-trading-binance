@@ -14,7 +14,23 @@ class ExecutionMode(str, Enum):
 
 
 class Strategy(ABC):
-    """Abstract base class for all trading strategies."""
+    """Abstract base class for all trading strategies.
+
+    각 전략은 자체 매매 파라미터를 클래스 속성으로 정의한다.
+    엔진은 DB 설정 대신 전략의 속성을 읽어 SL/TP/레버리지/투자비율을 결정.
+    """
+
+    # ── 매매 파라미터 (전략별 오버라이드) ──
+    LEVERAGE: int = 5                   # 레버리지 배수
+    POSITION_SIZE_PCT: float = 0.20     # 잔고 대비 투자 비율
+    MAX_HOLD_HOURS: float = 4.0         # 최대 보유 시간 (시간)
+
+    # ATR 기반 SL/TP (0이면 전략 자체 관리)
+    SL_ATR_MULT: float = 2.0
+    TP_ATR_MULT: float = 4.0
+    PARTIAL_TP_ATR_MULT: float = 0.0    # 0이면 부분익절 없음
+    TRAILING_ATR_MULT: float = 0.0      # 0이면 트레일링 없음
+    TRAILING_DIST_ATR: float = 0.0
 
     @property
     @abstractmethod

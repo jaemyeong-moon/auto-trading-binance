@@ -84,7 +84,11 @@ class AggressiveMomentumRider(Strategy):
     추세 없으면 쉰다. 수수료 사전 차감.
     """
 
-    # 엔진 ATR SL/TP 비활성화 (자체 관리)
+    # v9: EMA 추세 + 눌림목 — 자체 SL/TP 관리
+    LEVERAGE = 5
+    POSITION_SIZE_PCT = 0.15    # 보수적 (추세 눌림목은 넓은 SL)
+    MAX_HOLD_HOURS = 6.0
+    # 엔진 ATR SL/TP 비활성화 (자체 관리: SL=2ATR, TP=4ATR)
     SL_ATR_MULT = 99.0
     TP_ATR_MULT = 99.0
     PARTIAL_TP_ATR_MULT = 99.0

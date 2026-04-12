@@ -262,12 +262,15 @@ class SmartMomentumScalper(Strategy):
     7. 모멘텀 '가속도' 확인 (후행성 완화)
     """
 
-    # ATR 배수 기반 TP/SL
-    SL_ATR_MULT = 1.5       # 손절 = 1.5 × ATR (조기 손절 방지)
-    TP_ATR_MULT = 3.0       # 익절 = 3 × ATR (1:2 RR)
-    TRAILING_ATR_MULT = 2.0  # 트레일링 활성화 = 2 × ATR
-    TRAILING_DIST_ATR = 0.8  # 트레일링 거리 = 0.8 × ATR
-    PARTIAL_TP_ATR_MULT = 1.5  # 부분익절 = 1.5 × ATR
+    # v3: ADX Regime + VWAP + 7점 스코어링
+    LEVERAGE = 7
+    POSITION_SIZE_PCT = 0.20
+    MAX_HOLD_HOURS = 4.0
+    SL_ATR_MULT = 1.5           # 손절 = 1.5 × ATR
+    TP_ATR_MULT = 3.0           # 익절 = 3 × ATR (1:2 RR)
+    TRAILING_ATR_MULT = 2.0     # 트레일링 활성화 = 2 × ATR
+    TRAILING_DIST_ATR = 0.8     # 트레일링 거리 = 0.8 × ATR
+    PARTIAL_TP_ATR_MULT = 1.5   # 부분익절 = 1.5 × ATR
 
     SCORE_THRESHOLD = 5      # 7점 만점 중 5점
     MAX_TRADES_PER_HOUR = 4  # 시간당 최대 매매

@@ -259,8 +259,12 @@ class DataDrivenScalper(Strategy):
     5. 적응형 쿨다운 (연패 시 증가)
     """
 
-    SL_ATR_MULT = SL_ATR_MULT
-    TP_ATR_MULT = TP_ATR_MULT
+    # v11: 데이터 기반 8점 스코어링
+    LEVERAGE = 7
+    POSITION_SIZE_PCT = 0.20
+    MAX_HOLD_HOURS = 4.0
+    SL_ATR_MULT = SL_ATR_MULT          # 1.5
+    TP_ATR_MULT = TP_ATR_MULT          # 3.0 (1:2 RR)
     PARTIAL_TP_ATR_MULT = round(TP_ATR_MULT * 0.5, 2)
     TRAILING_ATR_MULT = round(TP_ATR_MULT * 0.7, 2)
     TRAILING_DIST_ATR = 0.5

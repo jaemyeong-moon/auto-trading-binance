@@ -48,7 +48,7 @@ class FuturesEngine:
         self.strategies[symbol] = strategy
         self._current_strategy_name[symbol] = strategy_name
 
-        leverage = db.get_setting_int("leverage")
+        leverage = getattr(strategy, "LEVERAGE", 5)
         await self.client.set_leverage(symbol, leverage)
 
         db.set_bot_running(symbol, True)
@@ -97,10 +97,6 @@ class FuturesEngine:
                 # 10분마다 시간 재동기화
                 if tick_count % 20 == 0:
                     await self.client.sync_time()
-
-                # 10분마다 TP/SL 자동 최적화 (1분봉 500개로)
-                if tick_count % 20 == 1:
-                    await self._run_auto_optimize(symbol)
 
                 # AI Agent: 주기적으로 전략 성과 분석 및 신규 전략 생성
                 if self._ai_agent_enabled and tick_count % AI_AGENT_INTERVAL_TICKS == 1:
@@ -289,18 +285,14 @@ class FuturesEngine:
                 self.strategies[symbol] = new_strategy
                 self._current_strategy_name[symbol] = new_strategy_name
 
-                # 레버리지 재설정
-                leverage = db.get_setting_int("leverage")
+                # 레버리지 재설정 (전략 정의값)
+                leverage = getattr(new_strategy, "LEVERAGE", 5)
                 await self.client.set_leverage(symbol, leverage)
 
                 self._restart_status[symbol] = ""
                 logger.info("engine.strategy_switched",
                             symbol=symbol, strategy=new_strategy_name)
                 return new_strategy
-
-            # 레버리지만 변경된 경우
-            leverage = db.get_setting_int("leverage")
-            await self.client.set_leverage(symbol, leverage)
 
         except Exception:
             logger.exception("engine.hot_reload_failed", symbol=symbol)
@@ -609,32 +601,13 @@ class FuturesEngine:
                      avg_entry=f"${avg_entry:,.2f}",
                      invest=f"${invest:.2f}")
 
-    def _dynamic_size_pct(self, balance: float) -> float:
-        """잔고 기반 동적 투자 비율 — 1심볼 집중 운영 최적화.
-
-        $150 미만: 25% (자본 보호하면서도 의미있는 포지션)
-        $150~$300: 30% (기본)
-        $300~$500: 35% (수익 확인 후 확대)
-        $500~$1000: 40% (본격 스케일업)
-        $1000+: 45% (최대)
-        """
-        if balance < 150:
-            return 0.25
-        elif balance < 300:
-            return 0.30
-        elif balance < 500:
-            return 0.35
-        elif balance < 1000:
-            return 0.40
-        else:
-            return 0.45
-
     async def _open_position(self, symbol: str, direction: str, price: float) -> None:
         balance = await self.client.get_balance()
 
-        # 전략이 자체 포지션 설정을 가지면 사용
-        leverage = db.get_setting_int("leverage") or 5
-        size_pct = self._dynamic_size_pct(balance)
+        # 전략이 정의한 레버리지/투자비율 사용
+        strategy = self.strategies.get(symbol)
+        leverage = getattr(strategy, "LEVERAGE", 5)
+        size_pct = getattr(strategy, "POSITION_SIZE_PCT", 0.20)
 
         # 안전장치: 가용 잔고의 90%를 넘지 않도록 (증거금 여유)
         max_invest = balance * 0.9
@@ -686,7 +659,6 @@ class FuturesEngine:
             return
 
         # SL/TP 가격 계산 + DB 저장 + 거래소 주문
-        strategy = self.strategies.get(symbol)
         sl_price, tp_price = self._calc_sl_tp(direction, price, strategy)
         db.open_position(
             symbol=symbol, side=direction, entry_price=price,

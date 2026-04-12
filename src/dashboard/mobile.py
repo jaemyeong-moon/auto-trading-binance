@@ -780,55 +780,17 @@ body {
       <select id="sStrategy"></select>
     </div>
     <div id="strategyInfo" style="font-size:12px;color:var(--dim);padding:4px 0;"></div>
-  </div>
-  <div class="card">
-    <div class="card-title">거래 설정</div>
-    <div class="setting-row">
-      <label>레버리지</label>
-      <select id="sLeverage">
-        <option value="1">x1</option><option value="2">x2</option>
-        <option value="3">x3</option><option value="5">x5</option>
-        <option value="7">x7</option><option value="10">x10</option>
-        <option value="15">x15</option><option value="20">x20</option>
-      </select>
-    </div>
-    <div class="setting-row">
-      <label>투자 비율 (%)</label>
-      <input type="number" id="sSizePct" min="5" max="100" step="5">
-    </div>
-    <div class="setting-row">
-      <label>익절 (%)</label>
-      <input type="number" id="sTp" min="0.1" max="10" step="0.1">
-    </div>
-    <div class="setting-row">
-      <label>손절 (%)</label>
-      <input type="number" id="sSl" min="0.1" max="10" step="0.1">
-    </div>
     <div class="setting-row">
       <label>분석 주기 (초)</label>
       <input type="number" id="sTick" min="5" max="120" step="5">
     </div>
+    <button class="btn-primary" onclick="saveSettings()">전략 변경</button>
+    <div id="saveMsg" style="font-size:12px;color:var(--green);margin-top:8px;text-align:center;display:none;"></div>
   </div>
   <div class="card">
-    <div class="card-title">ATR 기반 SL/TP 배수</div>
-    <div class="setting-row">
-      <label>SL 배수 (ATR x)</label>
-      <input type="number" id="sSlMult" min="0.5" max="20" step="0.5">
-    </div>
-    <div class="setting-row">
-      <label>TP 배수 (ATR x)</label>
-      <input type="number" id="sTpMult" min="0.5" max="30" step="0.5">
-    </div>
-    <div class="setting-row">
-      <label>트레일링 활성화 배수 (ATR x)</label>
-      <input type="number" id="sTrailAct" min="0.5" max="20" step="0.5">
-    </div>
-    <div class="setting-row">
-      <label>트레일링 거리 배수 (ATR x)</label>
-      <input type="number" id="sTrailDist" min="0.1" max="10" step="0.1">
-    </div>
-    <button class="btn-primary" onclick="saveSettings()">설정 저장</button>
-    <div id="saveMsg" style="font-size:12px;color:var(--green);margin-top:8px;text-align:center;display:none;"></div>
+    <div class="card-title">전략 파라미터 (자동 설정)</div>
+    <div id="strategyParams" style="font-size:13px;line-height:1.8;color:var(--text);"></div>
+    <div style="font-size:11px;color:var(--dim);margin-top:8px;">각 전략이 자체 최적 파라미터를 정의합니다. 수동 변경 불가.</div>
   </div>
 </div>
 
@@ -1626,7 +1588,6 @@ async function loadPaperTrades() {
 
 // ─── Settings ────────────────────────────────
 async function loadSettingsForm() {
-  // Load strategies into dropdown
   if (!strategiesCache.length) await loadStrategies();
   const sel = document.getElementById('sStrategy');
   if (sel.options.length <= 1) {
@@ -1635,55 +1596,46 @@ async function loadSettingsForm() {
     ).join('');
   }
 
-  // Fill form with current values
   if (!statusCache) await loadStatus();
   if (statusCache && statusCache.settings) {
-    const s = statusCache.settings;
-    sel.value = s.strategy;
-    document.getElementById('sLeverage').value = s.leverage || '5';
-    document.getElementById('sSizePct').value = (parseFloat(s.position_size_pct) * 100).toFixed(0);
-    document.getElementById('sTp').value = (parseFloat(s.tp_pct) * 100).toFixed(1);
-    document.getElementById('sSl').value = (parseFloat(s.sl_pct) * 100).toFixed(1);
-    document.getElementById('sTick').value = s.tick_interval;
-    document.getElementById('sSlMult').value = s.auto_sl_mult || '1.0';
-    document.getElementById('sTpMult').value = s.auto_tp_mult || '2.0';
-    document.getElementById('sTrailAct').value = s.auto_trail_act_mult || '1.5';
-    document.getElementById('sTrailDist').value = s.auto_trail_dist_mult || '0.5';
+    sel.value = statusCache.settings.strategy;
+    document.getElementById('sTick').value = statusCache.settings.tick_interval;
   }
 
-  // Strategy description on change
-  sel.onchange = () => {
+  const updateParams = () => {
     const info = strategiesCache.find(x=>x.name===sel.value);
     document.getElementById('strategyInfo').textContent = info ? info.description : '';
+    // 전략 파라미터 표시
+    const params = (info && info.params) || {};
+    const el = document.getElementById('strategyParams');
+    el.innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;">
+        <div>레버리지 <b>${params.leverage || '?'}x</b></div>
+        <div>투자비율 <b>${((params.position_size_pct || 0)*100).toFixed(0)}%</b></div>
+        <div>SL <b>${params.sl_atr_mult || '?'} ATR</b></div>
+        <div>TP <b>${params.tp_atr_mult || '?'} ATR</b></div>
+        <div>최대보유 <b>${params.max_hold_hours || '?'}h</b></div>
+        <div>모드 <b>${info ? info.mode : '?'}</b></div>
+      </div>`;
   };
-  sel.onchange();
+  sel.onchange = updateParams;
+  updateParams();
 }
 
 async function saveSettings() {
   const body = {
     strategy: document.getElementById('sStrategy').value,
-    leverage: document.getElementById('sLeverage').value,
-    position_size_pct: String(Number(document.getElementById('sSizePct').value)/100),
-    tp_pct: String(Number(document.getElementById('sTp').value)/100),
-    sl_pct: String(Number(document.getElementById('sSl').value)/100),
     tick_interval: document.getElementById('sTick').value,
-    auto_sl_mult: document.getElementById('sSlMult').value,
-    auto_tp_mult: document.getElementById('sTpMult').value,
-    auto_trail_act_mult: document.getElementById('sTrailAct').value,
-    auto_trail_dist_mult: document.getElementById('sTrailDist').value,
   };
   const r = await authFetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
   if (r) {
     const d = await r.json();
     const msgEl = document.getElementById('saveMsg');
-    msgEl.textContent = d.message || '설정 저장 완료';
+    msgEl.textContent = d.message || '전략 변경 완료';
     msgEl.style.display = 'block';
-    if (d.strategy_changed) {
-      msgEl.style.color = 'var(--orange)';
-    } else {
-      msgEl.style.color = 'var(--green)';
-    }
+    msgEl.style.color = d.strategy_changed ? 'var(--orange)' : 'var(--green)';
     setTimeout(() => { msgEl.style.display = 'none'; }, 4000);
+    loadSettingsForm();  // 파라미터 테이블 갱신
   }
   loadStatus();
 }
