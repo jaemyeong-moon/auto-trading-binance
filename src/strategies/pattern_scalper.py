@@ -62,7 +62,7 @@ class PatternScalper(Strategy):
 
     SL_ATR_MULT = 2.5     # SL = 2.5 ATR (손실 크기 축소)
     TP_ATR_MULT = 5.0     # TP = 5 ATR (1:2 RR)
-    MAX_HOLD_TICKS = 100  # 최대 보유 ~25시간(15분봉) — 대손실 방지
+    MAX_HOLD_TICKS = 960  # 최대 보유 ~4시간 (15초틱 × 960 = 14400초)
 
     def __init__(self) -> None:
         self.state = V12State()
@@ -193,10 +193,6 @@ class PatternScalper(Strategy):
             confidence *= 0.85
 
         confidence = min(1.0, confidence)
-
-        # LONG 패턴은 confidence 10% 페널티 (LONG 손실 패턴 방어)
-        if best.direction == "LONG":
-            confidence *= 0.9
 
         if confidence < 0.2:
             return self._hold(symbol, reason="low_confidence",

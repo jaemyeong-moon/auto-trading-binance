@@ -48,9 +48,7 @@ class FuturesEngine:
         self.strategies[symbol] = strategy
         self._current_strategy_name[symbol] = strategy_name
 
-        # 전략이 자체 레버리지를 가지면 사용 (v6+)
-        from src.strategies import aggressive_scalper as _as
-        leverage = getattr(_as, "LEVERAGE", db.get_setting_int("leverage"))
+        leverage = db.get_setting_int("leverage")
         await self.client.set_leverage(symbol, leverage)
 
         db.set_bot_running(symbol, True)
@@ -292,8 +290,7 @@ class FuturesEngine:
                 self._current_strategy_name[symbol] = new_strategy_name
 
                 # 레버리지 재설정
-                from src.strategies import aggressive_scalper as _as
-                leverage = getattr(_as, "LEVERAGE", db.get_setting_int("leverage"))
+                leverage = db.get_setting_int("leverage")
                 await self.client.set_leverage(symbol, leverage)
 
                 self._restart_status[symbol] = ""
@@ -302,8 +299,7 @@ class FuturesEngine:
                 return new_strategy
 
             # 레버리지만 변경된 경우
-            from src.strategies import aggressive_scalper as _as
-            leverage = getattr(_as, "LEVERAGE", db.get_setting_int("leverage"))
+            leverage = db.get_setting_int("leverage")
             await self.client.set_leverage(symbol, leverage)
 
         except Exception:
@@ -572,8 +568,7 @@ class FuturesEngine:
                                 size_pct: float) -> None:
         """DCA 물타기 — 기존 포지션에 추가 매수/매도."""
         balance = await self.client.get_balance()
-        from src.strategies import aggressive_scalper as _as
-        leverage = getattr(_as, "LEVERAGE", 5)
+        leverage = db.get_setting_int("leverage") or 5
         invest = balance * size_pct
         quantity = (invest * leverage) / price
         quantity = self._round_qty(symbol, quantity)
@@ -638,17 +633,8 @@ class FuturesEngine:
         balance = await self.client.get_balance()
 
         # 전략이 자체 포지션 설정을 가지면 사용
-        strategy = self.strategies.get(symbol)
-        from src.strategies import aggressive_scalper as _as
-        if hasattr(_as, "LEVERAGE"):
-            leverage = _as.LEVERAGE
-            # 적응형: 전략 state에서 동적 size_pct 읽기
-            state = getattr(strategy, "state", None)
-            params = getattr(state, "params", None)
-            size_pct = getattr(params, "grid_size_pct", 0.06) if params else 0.06
-        else:
-            size_pct = self._dynamic_size_pct(balance)
-            leverage = db.get_setting_int("leverage")
+        leverage = db.get_setting_int("leverage") or 5
+        size_pct = self._dynamic_size_pct(balance)
 
         # 안전장치: 가용 잔고의 90%를 넘지 않도록 (증거금 여유)
         max_invest = balance * 0.9
