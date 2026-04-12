@@ -27,6 +27,7 @@ class FuturesEngine:
         self.client = client
         self.strategies: dict[str, Strategy] = {}
         self._tasks: dict[str, asyncio.Task] = {}
+        self._paper_task: asyncio.Task | None = None  # 독립 가상매매 태스크
         self._paper_trader = None  # lazy init
         self._ai_agent = None  # lazy init
         self._ai_agent_enabled = bool(
@@ -58,6 +59,11 @@ class FuturesEngine:
         logger.info("engine.start", symbol=symbol, strategy=strategy.name,
                      mode=strategy.mode.value, leverage=leverage)
 
+        # 가상매매 독립 루프 — 최초 1회만 시작
+        if self._paper_task is None or self._paper_task.done():
+            self._paper_task = asyncio.create_task(self._paper_loop())
+            logger.info("engine.paper_loop_started")
+
     async def stop_symbol(self, symbol: str) -> None:
         db.set_bot_running(symbol, False)
         task = self._tasks.pop(symbol, None)
@@ -73,6 +79,13 @@ class FuturesEngine:
     async def stop_all(self) -> None:
         for symbol in list(self._tasks.keys()):
             await self.stop_symbol(symbol)
+        # 가상매매 루프도 종료
+        if self._paper_task and not self._paper_task.done():
+            self._paper_task.cancel()
+            try:
+                await self._paper_task
+            except asyncio.CancelledError:
+                pass
 
     # ─── Main loop ─────────────────────────────────────────
 
@@ -103,10 +116,6 @@ class FuturesEngine:
                     await self._tick_always_flip(symbol, strategy)
                 else:
                     await self._tick_signal_only(symbol, strategy)
-
-                # 페이퍼 트레이딩: 5틱마다 모든 전략 가상매매
-                if tick_count % 5 == 0:
-                    await self._run_paper_trading(symbol)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -121,22 +130,38 @@ class FuturesEngine:
                          sleep=tick_interval)
             await asyncio.sleep(tick_interval)
 
-    async def _run_paper_trading(self, symbol: str) -> None:
-        """페이퍼 트레이딩: 모든 전략을 가상매매로 실행."""
-        try:
-            from src.core.paper_trader import PaperTrader
-            if self._paper_trader is None:
-                self._paper_trader = PaperTrader()
+    # ─── 독립 가상매매 루프 ──────────────────────────────────
 
-            candles_15m = await self.client.get_candles(symbol, interval="15m", limit=200)
-            htf = await self.client.get_candles(symbol, interval="1h", limit=100)
-            if candles_15m.empty:
-                return
+    async def _paper_loop(self) -> None:
+        """가상매매 독립 루프 — 실거래 엔진 상태와 무관하게 계속 실행."""
+        from src.core.paper_trader import PaperTrader
+        paper_symbols = ["BTCUSDT", "ETHUSDT"]
+        tick_interval = 75  # 75초 (기존 tick 15초 × 5틱 = 75초 주기 유지)
 
-            await self._paper_trader.tick(
-                {symbol: candles_15m}, {symbol: htf})
-        except Exception:
-            logger.exception("paper.run_failed", symbol=symbol)
+        if self._paper_trader is None:
+            self._paper_trader = PaperTrader()
+
+        while True:
+            try:
+                candles_map = {}
+                htf_map = {}
+                for symbol in paper_symbols:
+                    candles_15m = await self.client.get_candles(
+                        symbol, interval="15m", limit=200)
+                    htf = await self.client.get_candles(
+                        symbol, interval="1h", limit=100)
+                    if not candles_15m.empty:
+                        candles_map[symbol] = candles_15m
+                    if not htf.empty:
+                        htf_map[symbol] = htf
+
+                if candles_map:
+                    await self._paper_trader.tick(candles_map, htf_map)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("paper.loop_error")
+            await asyncio.sleep(tick_interval)
 
     async def _run_ai_agent(self, symbol: str) -> None:
         """AI Agent 실행: 성과 분석 → 필요 시 신규 전략 생성 → 핫 스왑."""
