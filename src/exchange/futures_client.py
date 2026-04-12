@@ -53,13 +53,15 @@ class FuturesClient:
 
     async def get_candles(
         self, symbol: str, interval: str = "1m", limit: int = 200,
+        start_time: int | None = None,
     ) -> pd.DataFrame:
         MAX_PER_REQUEST = 1500
 
         if limit <= MAX_PER_REQUEST:
-            raw = await self.client.futures_klines(
-                symbol=symbol, interval=interval, limit=limit,
-            )
+            params = dict(symbol=symbol, interval=interval, limit=limit)
+            if start_time:
+                params["startTime"] = start_time
+            raw = await self.client.futures_klines(**params)
         else:
             # 1500개 초과 시 여러 번 나눠서 조회
             raw = []

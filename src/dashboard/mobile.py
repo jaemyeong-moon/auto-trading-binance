@@ -380,6 +380,7 @@ async def api_trade_chart(request: Request, trade_id: int, source: str = "real")
         try:
             candles = await client.get_candles(
                 info["symbol"], interval=interval, limit=limit,
+                start_time=start_ms,
             )
         finally:
             await client.disconnect()
@@ -904,28 +905,33 @@ function buildSltpBar(side, entry, exit, sl, tp, pnl, trail) {
   let lossL, lossW, profitL, profitW;
   if (isLong) { lossL=0; lossW=entryPct; profitL=entryPct; profitW=100-entryPct; }
   else { profitL=0; profitW=entryPct; lossL=entryPct; lossW=100-entryPct; }
-  const slLabel = isLong ? `SL ${sl.toFixed(0)}` : `TP ${tp.toFixed(0)}`;
-  const tpLabel = isLong ? `TP ${tp.toFixed(0)}` : `SL ${sl.toFixed(0)}`;
+  // 바 왼쪽 = 낮은 가격, 오른쪽 = 높은 가격 (가격축 기준)
+  // LONG: 왼쪽=SL(손절), 오른쪽=TP(익절)  /  SHORT: 왼쪽=TP(익절), 오른쪽=SL(손절)
+  const leftPrice = Math.min(sl, tp);
+  const rightPrice = Math.max(sl, tp);
+  const slLabel = isLong ? `손절 ${leftPrice.toFixed(0)}` : `익절 ${leftPrice.toFixed(0)}`;
+  const tpLabel = isLong ? `익절 ${rightPrice.toFixed(0)}` : `손절 ${rightPrice.toFixed(0)}`;
 
   // trail dots + connecting line
   let trailHtml = '';
   if (trail && trail.length > 1) {
-    const pcts = trail.map(t => t.pct);
-    const minPct = Math.min(...pcts);
-    const maxPct = Math.max(...pcts);
-    // gradient line showing range traversed
+    // trail pct: 0=SL, 100=TP (방향 무관)
+    // bar 좌표: LONG→ 왼쪽SL 오른쪽TP, SHORT→ 왼쪽TP 오른쪽SL
+    // SHORT일 때 trail pct를 bar 좌표로 변환: 100 - pct
+    const toBarPct = (pct) => isLong ? pct : 100 - pct;
+    const barPcts = trail.map(t => toBarPct(t.pct));
+    const minPct = Math.min(...barPcts);
+    const maxPct = Math.max(...barPcts);
     const lineLeft = Math.max(0, minPct);
     const lineRight = Math.min(100, maxPct);
     const lineWidth = lineRight - lineLeft;
     if (lineWidth > 0.5) {
       trailHtml += `<div class="trail-line" style="left:${lineLeft}%;width:${lineWidth}%;background:linear-gradient(90deg,rgba(239,83,80,0.5),rgba(255,255,255,0.3),rgba(38,166,154,0.5))"></div>`;
     }
-    // sample up to 20 dots evenly
     const step = Math.max(1, Math.floor(trail.length / 20));
     for (let i = 0; i < trail.length; i += step) {
-      const pt = trail[i];
-      const dotPct = Math.max(1, Math.min(99, pt.pct));
-      const alpha = 0.3 + (i / trail.length) * 0.5; // older=dim, newer=bright
+      const dotPct = Math.max(1, Math.min(99, barPcts[i]));
+      const alpha = 0.3 + (i / trail.length) * 0.5;
       trailHtml += `<div class="trail-dot" style="left:${dotPct}%;opacity:${alpha.toFixed(2)}"></div>`;
     }
   }
@@ -938,7 +944,7 @@ function buildSltpBar(side, entry, exit, sl, tp, pnl, trail) {
       <div class="entry-line" style="left:${entryPct}%"></div>
       <div class="exit-dot" style="left:${exitPct}%;background:${exitColor}"></div>
     </div>
-    <div class="sltp-labels"><span>${slLabel}</span><span>${tpLabel}</span></div>`;
+    <div class="sltp-labels"><span style="color:${isLong?'var(--red)':'var(--green)'}">${slLabel}</span><span style="color:${isLong?'var(--green)':'var(--red)'}">${tpLabel}</span></div>`;
 }
 
 // ─── Load Status ─────────────────────────────
