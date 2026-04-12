@@ -686,6 +686,7 @@ class FuturesEngine:
             return
 
         # SL/TP 가격 계산 + DB 저장 + 거래소 주문
+        strategy = self.strategies.get(symbol)
         sl_price, tp_price = self._calc_sl_tp(direction, price, strategy)
         db.open_position(
             symbol=symbol, side=direction, entry_price=price,
