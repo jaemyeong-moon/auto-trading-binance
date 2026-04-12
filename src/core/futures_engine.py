@@ -134,9 +134,9 @@ class FuturesEngine:
 
     async def _paper_loop(self) -> None:
         """가상매매 독립 루프 — 실거래 엔진 상태와 무관하게 계속 실행."""
-        from src.core.paper_trader import PaperTrader
-        paper_symbols = ["BTCUSDT", "ETHUSDT"]
-        tick_interval = 75  # 75초 (기존 tick 15초 × 5틱 = 75초 주기 유지)
+        from src.core.paper_trader import PaperTrader, SYMBOLS as PAPER_SYMBOLS
+        paper_symbols = PAPER_SYMBOLS  # paper_trader.py의 SYMBOLS와 동기화
+        tick_interval = db.get_setting_int("tick_interval") * 5  # 설정 기반 동적 주기
 
         if self._paper_trader is None:
             self._paper_trader = PaperTrader()
