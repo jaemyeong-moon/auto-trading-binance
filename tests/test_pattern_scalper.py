@@ -746,3 +746,149 @@ class TestPatternScalerIntegration:
         volume = np.full(n, 3000.0)
         result = detect_triangle_breakout(lows, highs, close, volume, atr=0.5)
         assert result is None or result.direction in ("LONG", "SHORT")
+
+
+# ─── Task 12.5: SHORT 편향 회귀 테스트 ────────────────────────────────────────
+
+class TestShortBiasRegression:
+    """Task 12.5 — LONG/SHORT 진입 비율 편향 없음 회귀 테스트."""
+
+    def _make_uptrend_candles(self, n: int = 150, price: float = 100.0) -> pd.DataFrame:
+        prices = np.linspace(price * 0.9, price, n)
+        volumes = np.full(n, 3000.0)
+        return pd.DataFrame({
+            "open": np.roll(prices, 1),
+            "high": prices * 1.005,
+            "low": prices * 0.995,
+            "close": prices,
+            "volume": volumes,
+        })
+
+    def _make_downtrend_candles(self, n: int = 150, price: float = 100.0) -> pd.DataFrame:
+        prices = np.linspace(price, price * 0.9, n)
+        volumes = np.full(n, 3000.0)
+        return pd.DataFrame({
+            "open": np.roll(prices, 1),
+            "high": prices * 1.005,
+            "low": prices * 0.995,
+            "close": prices,
+            "volume": volumes,
+        })
+
+    def _long_pattern(self, price: float = 100.0) -> PatternResult:
+        return PatternResult(
+            name="double_bottom",
+            direction="LONG",
+            strength=0.85,
+            entry_price=price,
+            sl_price=price * 0.95,
+            tp_price=price * 1.10,
+            neckline=price * 0.98,
+            pattern_height=price * 0.05,
+        )
+
+    def _short_pattern(self, price: float = 100.0) -> PatternResult:
+        return PatternResult(
+            name="double_top",
+            direction="SHORT",
+            strength=0.85,
+            entry_price=price,
+            sl_price=price * 1.05,
+            tp_price=price * 0.90,
+            neckline=price * 1.02,
+            pattern_height=price * 0.05,
+        )
+
+    def test_long_signal_produced_for_double_bottom(self):
+        """double_bottom 패턴에서 BUY 신호가 발생해야 한다."""
+        scalper = _make_scalper()
+        candles = self._make_uptrend_candles()
+        price = float(candles["close"].iloc[-1])
+        pattern = self._long_pattern(price=price)
+
+        with patch("src.core.time_filter.is_tradeable_hour", return_value=True), \
+             patch("src.strategies.pattern_scalper.scan_all_patterns",
+                   return_value=[pattern]):
+            sig = scalper.evaluate("BTCUSDT", candles)
+
+        assert sig.type == SignalType.BUY
+
+    def test_short_signal_produced_for_double_top(self):
+        """double_top 패턴에서 SELL 신호가 발생해야 한다."""
+        scalper = _make_scalper()
+        candles = self._make_downtrend_candles()
+        price = float(candles["close"].iloc[-1])
+        pattern = self._short_pattern(price=price)
+
+        with patch("src.core.time_filter.is_tradeable_hour", return_value=True), \
+             patch("src.strategies.pattern_scalper.scan_all_patterns",
+                   return_value=[pattern]):
+            sig = scalper.evaluate("BTCUSDT", candles)
+
+        assert sig.type == SignalType.SELL
+
+    def test_symmetric_long_short_signal_count(self):
+        """동일 횟수의 LONG/SHORT 패턴 시나리오에서 BUY/SELL 신호 수가 같아야 한다."""
+        n_scenarios = 5
+        buy_count = 0
+        sell_count = 0
+
+        price = 100.0
+
+        for _ in range(n_scenarios):
+            # LONG 시나리오
+            scalper_long = _make_scalper()
+            candles_up = self._make_uptrend_candles(price=price)
+            price_up = float(candles_up["close"].iloc[-1])
+            pattern_long = self._long_pattern(price=price_up)
+            with patch("src.core.time_filter.is_tradeable_hour", return_value=True), \
+                 patch("src.strategies.pattern_scalper.scan_all_patterns",
+                       return_value=[pattern_long]):
+                sig = scalper_long.evaluate("BTCUSDT", candles_up)
+            if sig.type == SignalType.BUY:
+                buy_count += 1
+
+            # SHORT 시나리오
+            scalper_short = _make_scalper()
+            candles_dn = self._make_downtrend_candles(price=price)
+            price_dn = float(candles_dn["close"].iloc[-1])
+            pattern_short = self._short_pattern(price=price_dn)
+            with patch("src.core.time_filter.is_tradeable_hour", return_value=True), \
+                 patch("src.strategies.pattern_scalper.scan_all_patterns",
+                       return_value=[pattern_short]):
+                sig = scalper_short.evaluate("BTCUSDT", candles_dn)
+            if sig.type == SignalType.SELL:
+                sell_count += 1
+
+        # 대칭 패턴에서 BUY와 SELL의 수가 동일해야 한다
+        assert buy_count == sell_count, (
+            f"SHORT 편향 감지: BUY={buy_count}, SELL={sell_count} — "
+            "LONG과 SHORT 신호 수가 대칭이어야 합니다"
+        )
+
+    def test_no_direction_bias_in_metadata(self):
+        """BUY 신호 metadata의 direction은 LONG, SELL 신호는 SHORT이어야 한다."""
+        scalper_long = _make_scalper()
+        candles_up = self._make_uptrend_candles()
+        price = float(candles_up["close"].iloc[-1])
+        pattern_long = self._long_pattern(price=price)
+
+        with patch("src.core.time_filter.is_tradeable_hour", return_value=True), \
+             patch("src.strategies.pattern_scalper.scan_all_patterns",
+                   return_value=[pattern_long]):
+            sig_buy = scalper_long.evaluate("BTCUSDT", candles_up)
+
+        scalper_short = _make_scalper()
+        candles_dn = self._make_downtrend_candles()
+        price_dn = float(candles_dn["close"].iloc[-1])
+        pattern_short = self._short_pattern(price=price_dn)
+
+        with patch("src.core.time_filter.is_tradeable_hour", return_value=True), \
+             patch("src.strategies.pattern_scalper.scan_all_patterns",
+                   return_value=[pattern_short]):
+            sig_sell = scalper_short.evaluate("BTCUSDT", candles_dn)
+
+        if sig_buy.type == SignalType.BUY:
+            assert sig_buy.metadata.get("direction") == "LONG"
+        if sig_sell.type == SignalType.SELL:
+            assert sig_sell.metadata.get("direction") == "SHORT"

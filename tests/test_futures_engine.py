@@ -680,6 +680,234 @@ async def test_open_position_allowed_when_no_trades_today(mock_futures_client):
     mock_futures_client.open_long.assert_called_once()
 
 
+
+# ── MAX_HOLD_HOURS Regression Tests ───────────────────────
+
+
+class _MaxHoldStrategy(Strategy):
+    """Strategy stub with configurable MAX_HOLD_HOURS.
+
+    evaluate() increments an internal tick counter and emits a CLOSE
+    signal (reason='max_hold') once ticks >= max_ticks, mirroring the
+    logic in PatternScalper._evaluate_exit.
+    """
+
+    LEVERAGE = 5
+    POSITION_SIZE_PCT = 0.20
+    SL_PCT = 0.005
+    FULL_TP_PCT = 0.50           # very wide - won't trigger in these tests
+    PARTIAL_TP_PCT = 0.40
+    TRAILING_ACTIVATE_PCT = 0.45
+    TRAILING_DISTANCE_PCT = 0.10
+
+    def __init__(self, max_hold_hours: float, signal_type: SignalType = SignalType.HOLD):
+        self.MAX_HOLD_HOURS = max_hold_hours
+        self._signal_type = signal_type
+        self._ticks: int = 0   # test may pre-set to simulate elapsed ticks
+
+    @property
+    def name(self) -> str:
+        return f"max_hold_stub_{self.MAX_HOLD_HOURS}h"
+
+    @property
+    def mode(self) -> ExecutionMode:
+        return ExecutionMode.SIGNAL_ONLY
+
+    def evaluate(self, symbol, candles, htf_candles=None) -> Signal:
+        self._ticks += 1
+        tick_interval_secs = 15  # same as PatternScalper._evaluate_exit assumption
+        max_ticks = (
+            int(self.MAX_HOLD_HOURS * 3600 / tick_interval_secs)
+            if self.MAX_HOLD_HOURS > 0
+            else 999_999
+        )
+        if self._ticks >= max_ticks:
+            return Signal(
+                symbol=symbol,
+                type=SignalType.CLOSE,
+                confidence=0.9,
+                source=self.name,
+                metadata={"reason": "max_hold", "ticks_held": self._ticks},
+            )
+        return Signal(
+            symbol=symbol,
+            type=self._signal_type,
+            confidence=0.0,
+            source=self.name,
+        )
+
+
+def _db_patch_for_close() -> dict:
+    """Common db mock dict for tests that expect a position to be closed."""
+    return {
+        "get_setting": MagicMock(return_value=""),
+        "get_setting_float": MagicMock(return_value=0.005),
+        "get_setting_int": MagicMock(return_value=5),
+        "log_signal": MagicMock(),
+        "close_position": MagicMock(return_value=None),
+        "delete_position": MagicMock(),
+        "record_trail": MagicMock(),
+        "get_position": MagicMock(return_value=None),
+        "link_trails_to_trade": MagicMock(),
+        "get_settings_hash": MagicMock(return_value="abc"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_max_hold_exceeded_long_position_closes(mock_futures_client):
+    """MAX_HOLD_HOURS 경과 시 LONG 포지션 강제 청산 - close_long 호출 확인.
+
+    1/240 h = 15 s => max_ticks = int(1/240 * 3600 / 15) = 1.
+    첫 evaluate() 호출에서 _ticks=1 >= 1 => CLOSE 시그널 반환.
+    """
+    strategy = _MaxHoldStrategy(max_hold_hours=1 / 240)
+    engine = _make_engine_with_strategy(mock_futures_client, strategy)
+
+    mock_futures_client.get_position.return_value = {
+        "side": "LONG",
+        "entry_price": 100.0,
+        "quantity": 0.01,
+    }
+
+    with patch.multiple("src.core.futures_engine.db", **_db_patch_for_close()):
+        await engine._tick_signal_only("BTCUSDT", strategy)
+
+    mock_futures_client.close_long.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_max_hold_exceeded_short_position_closes(mock_futures_client):
+    """MAX_HOLD_HOURS 경과 시 SHORT 포지션 강제 청산 - close_short 호출 확인."""
+    strategy = _MaxHoldStrategy(max_hold_hours=1 / 240)
+    engine = _make_engine_with_strategy(mock_futures_client, strategy)
+
+    mock_futures_client.get_position.return_value = {
+        "side": "SHORT",
+        "entry_price": 100.0,
+        "quantity": 0.01,
+    }
+
+    with patch.multiple("src.core.futures_engine.db", **_db_patch_for_close()):
+        await engine._tick_signal_only("BTCUSDT", strategy)
+
+    mock_futures_client.close_short.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_max_hold_not_exceeded_does_not_close(mock_futures_client):
+    """MAX_HOLD_HOURS 미경과 시 청산 안 됨 (첫 틱, 한도 960틱 기준)."""
+    # 4-hour strategy: max_ticks=960; first tick -> _ticks=1 < 960 -> HOLD
+    strategy = _MaxHoldStrategy(max_hold_hours=4.0)
+    engine = _make_engine_with_strategy(mock_futures_client, strategy)
+
+    mock_futures_client.get_position.return_value = {
+        "side": "LONG",
+        "entry_price": 100.0,
+        "quantity": 0.01,
+    }
+
+    db_patch = {
+        "get_setting": MagicMock(return_value=""),
+        "get_setting_float": MagicMock(return_value=0.005),
+        "get_setting_int": MagicMock(return_value=5),
+        "log_signal": MagicMock(),
+        "get_settings_hash": MagicMock(return_value="abc"),
+        "get_position": MagicMock(return_value=None),
+        "record_trail": MagicMock(),
+    }
+
+    with patch.multiple("src.core.futures_engine.db", **db_patch):
+        await engine._tick_signal_only("BTCUSDT", strategy)
+
+    mock_futures_client.close_long.assert_not_called()
+    mock_futures_client.close_short.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_max_hold_v12_4h_triggers_before_v9_6h(mock_futures_client):
+    """v12(4h=960틱)은 청산되지만 v9(6h=1440틱)은 같은 틱 수에서 청산 안 됨.
+
+    두 전략이 서로 다른 MAX_HOLD_HOURS 기준으로 독립적으로 동작함을 검증.
+    """
+    tick_interval_secs = 15
+    v12_max_ticks = int(4.0 * 3600 / tick_interval_secs)   # 960
+    v9_max_ticks = int(6.0 * 3600 / tick_interval_secs)    # 1440
+
+    assert v12_max_ticks == 960, "v12 max_ticks sanity"
+    assert v9_max_ticks == 1440, "v9 max_ticks sanity"
+
+    # -- v12 at exactly 960 ticks -> CLOSE expected --------
+    v12_strategy = _MaxHoldStrategy(max_hold_hours=4.0)
+    v12_strategy._ticks = v12_max_ticks - 1   # evaluate() increments to 960
+    engine_v12 = _make_engine_with_strategy(mock_futures_client, v12_strategy)
+    mock_futures_client.get_position.return_value = {
+        "side": "LONG",
+        "entry_price": 100.0,
+        "quantity": 0.01,
+    }
+
+    with patch.multiple("src.core.futures_engine.db", **_db_patch_for_close()):
+        await engine_v12._tick_signal_only("BTCUSDT", v12_strategy)
+
+    mock_futures_client.close_long.assert_called_once()
+    mock_futures_client.reset_mock()
+
+    # -- v9 at same 960 ticks -> below 1440 threshold -> no CLOSE -----
+    v9_strategy = _MaxHoldStrategy(max_hold_hours=6.0)
+    v9_strategy._ticks = v12_max_ticks - 1   # 959 -> 960 after evaluate()
+    engine_v9 = _make_engine_with_strategy(mock_futures_client, v9_strategy)
+    mock_futures_client.get_position.return_value = {
+        "side": "LONG",
+        "entry_price": 100.0,
+        "quantity": 0.01,
+    }
+
+    db_patch_hold = {
+        "get_setting": MagicMock(return_value=""),
+        "get_setting_float": MagicMock(return_value=0.005),
+        "get_setting_int": MagicMock(return_value=5),
+        "log_signal": MagicMock(),
+        "get_settings_hash": MagicMock(return_value="abc"),
+        "get_position": MagicMock(return_value=None),
+        "record_trail": MagicMock(),
+    }
+
+    with patch.multiple("src.core.futures_engine.db", **db_patch_hold):
+        await engine_v9._tick_signal_only("BTCUSDT", v9_strategy)
+
+    mock_futures_client.close_long.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_max_hold_zero_means_no_time_limit(mock_futures_client):
+    """MAX_HOLD_HOURS=0 이면 시간 제한 없음 - 고(高)틱에서도 청산 안 됨."""
+    strategy = _MaxHoldStrategy(max_hold_hours=0.0)
+    strategy._ticks = 9_999  # well beyond any realistic threshold
+    engine = _make_engine_with_strategy(mock_futures_client, strategy)
+
+    mock_futures_client.get_position.return_value = {
+        "side": "LONG",
+        "entry_price": 100.0,
+        "quantity": 0.01,
+    }
+
+    db_patch = {
+        "get_setting": MagicMock(return_value=""),
+        "get_setting_float": MagicMock(return_value=0.005),
+        "get_setting_int": MagicMock(return_value=5),
+        "log_signal": MagicMock(),
+        "get_settings_hash": MagicMock(return_value="abc"),
+        "get_position": MagicMock(return_value=None),
+        "record_trail": MagicMock(),
+    }
+
+    with patch.multiple("src.core.futures_engine.db", **db_patch):
+        await engine._tick_signal_only("BTCUSDT", strategy)
+
+    mock_futures_client.close_long.assert_not_called()
+    mock_futures_client.close_short.assert_not_called()
+
+
 # ── Candle fetch path test ─────────────────────────────────
 
 
@@ -708,3 +936,149 @@ async def test_tick_signal_only_fetches_two_timeframes(mock_futures_client):
     ]
     assert "15m" in intervals_called
     assert "1h" in intervals_called
+
+
+# ── TIMEFRAMES 클래스 속성 Tests ───────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_fetch_candles_default_timeframes_calls_15m_and_1h(mock_futures_client):
+    """기본 TIMEFRAMES=["15m","1h"] → get_candles 15m + 1h 각 1회, 총 2회 호출."""
+    strategy = _SignalOnlyStrategy(SignalType.HOLD)
+    # 기본 TIMEFRAMES는 Strategy ABC에서 상속 → ["15m", "1h"]
+    assert strategy.TIMEFRAMES == ["15m", "1h"]
+
+    engine = _make_engine_with_strategy(mock_futures_client, strategy)
+
+    await engine._fetch_candles("BTCUSDT", strategy)
+
+    intervals_called = [
+        call.kwargs.get("interval") or call.args[1]
+        for call in mock_futures_client.get_candles.call_args_list
+    ]
+    assert intervals_called.count("15m") == 1
+    assert intervals_called.count("1h") == 1
+    assert len(intervals_called) == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_candles_custom_timeframes_5m_15m_1h_calls_three_times(mock_futures_client):
+    """커스텀 TIMEFRAMES=["5m","15m","1h"] → get_candles 3회 호출 (5m, 15m, 1h 각 1번)."""
+    class _CustomTFStrategy(_SignalOnlyStrategy):
+        TIMEFRAMES = ["5m", "15m", "1h"]
+
+    strategy = _CustomTFStrategy(SignalType.HOLD)
+    engine = _make_engine_with_strategy(mock_futures_client, strategy)
+
+    await engine._fetch_candles("BTCUSDT", strategy)
+
+    intervals_called = [
+        call.kwargs.get("interval") or call.args[1]
+        for call in mock_futures_client.get_candles.call_args_list
+    ]
+    # 3개 모두 각 1번씩 호출
+    assert intervals_called.count("5m") == 1
+    assert intervals_called.count("15m") == 1
+    assert intervals_called.count("1h") == 1
+    assert len(intervals_called) == 3
+
+
+# ── Task 13.4: ATR 동적 포지션 사이징 엔진 통합 Tests ────────
+
+
+class _AtrSignalStrategy(Strategy):
+    """Strategy stub that exposes _last_signal for ATR sizing integration."""
+
+    LEVERAGE = 5
+    POSITION_SIZE_PCT = 0.20
+    SL_ATR_MULT = 2.5
+
+    def __init__(self, atr: float = 0.0):
+        self._atr = atr
+        self._last_signal: Signal | None = None
+
+    @property
+    def name(self) -> str:
+        return "atr_signal_stub"
+
+    @property
+    def mode(self) -> ExecutionMode:
+        return ExecutionMode.SIGNAL_ONLY
+
+    def evaluate(self, symbol, candles, htf_candles=None) -> Signal:
+        sig = Signal(
+            symbol=symbol,
+            type=SignalType.BUY,
+            confidence=0.8,
+            source=self.name,
+            metadata={"atr": self._atr},
+        )
+        self._last_signal = sig
+        return sig
+
+
+@pytest.mark.asyncio
+async def test_atr_position_sizing_no_atr_uses_full_size(mock_futures_client):
+    """ATR=0(미설정) → scalar 적용 없음 → 기본 size_pct 그대로 사용 → 포지션 진입."""
+    strategy = _AtrSignalStrategy(atr=0.0)
+    engine = _make_engine_with_strategy(mock_futures_client, strategy)
+
+    mock_futures_client.get_balance.return_value = 1000.0
+
+    db_patch = {
+        "get_open_positions": MagicMock(return_value=[]),
+        "get_today_pnl": MagicMock(return_value=(0.0, 0)),
+        "get_setting": MagicMock(return_value=""),
+        "get_setting_float": MagicMock(return_value=0.005),
+        "get_setting_int": MagicMock(return_value=5),
+        "open_position": MagicMock(),
+    }
+
+    with patch.multiple("src.core.futures_engine.db", **db_patch):
+        await engine._open_position("BTCUSDT", "LONG", 50000.0)
+
+    mock_futures_client.open_long.assert_called_once()
+
+
+def test_risk_manager_atr_2x_halves_position_size():
+    """ATR 2× baseline → RiskManager scalar=0.5 → 사이즈 50% 축소 확인 (Task 13.4)."""
+    from src.core.risk_manager import RiskManager
+
+    rm = RiskManager()
+    balance = 1000.0
+    size_pct = 0.20
+    atr_base = 100.0
+
+    size_normal = rm.position_size(balance, size_pct, atr=atr_base, atr_baseline=atr_base)
+    size_2x = rm.position_size(balance, size_pct, atr=atr_base * 2, atr_baseline=atr_base)
+
+    assert size_2x == pytest.approx(size_normal * 0.5), (
+        f"ATR 2× 시 사이즈가 50%로 축소되어야 합니다: normal={size_normal}, 2x={size_2x}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_open_position_calls_risk_manager_position_size(mock_futures_client):
+    """_open_position이 RiskManager.position_size를 호출하는지 spy로 검증."""
+    strategy = _AtrSignalStrategy(atr=0.0)
+    engine = _make_engine_with_strategy(mock_futures_client, strategy)
+
+    mock_futures_client.get_balance.return_value = 1000.0
+
+    db_patch = {
+        "get_open_positions": MagicMock(return_value=[]),
+        "get_today_pnl": MagicMock(return_value=(0.0, 0)),
+        "get_setting": MagicMock(return_value=""),
+        "get_setting_float": MagicMock(return_value=0.005),
+        "get_setting_int": MagicMock(return_value=5),
+        "open_position": MagicMock(),
+    }
+
+    with patch.object(
+        engine._risk_manager, "position_size", wraps=engine._risk_manager.position_size
+    ) as mock_ps, patch.multiple("src.core.futures_engine.db", **db_patch):
+        await engine._open_position("BTCUSDT", "LONG", 50000.0)
+
+    mock_ps.assert_called_once()
+    call_kwargs = mock_ps.call_args
+    assert call_kwargs is not None, "position_size가 호출되지 않았습니다"

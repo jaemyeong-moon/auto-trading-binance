@@ -125,7 +125,7 @@
 | 12.2 | `tests/test_futures_engine.py` — 엔진 tick 루프 단위 테스트 (mock client) | tick 1회당 candles 조회→evaluate→signal→order 경로 커버, 정상/에러 케이스 3개 이상 | 12.0, 12.1 | cc:완了 |
 | 12.3 | **회귀 테스트 — MAX_HOLD_HOURS**: 전략별 max_hold 초과 시 강제 청산 호출 확인 | 전략 속성값(v1/v12 등) 기준으로 정확히 청산 트리거됨을 검증하는 테스트 pass | 12.2 | cc:TODO |
 | 12.4 | **회귀 테스트 — 레버리지 DB/전략 동기화**: 엔진이 `getattr(strategy, "LEVERAGE", 5)` 올바르게 읽고 바이낸스 호출에 반영 | mock client 에 setLeverage 호출 기록 확인, 전략별 값이 넘어감 | 12.2 | cc:완了 |
-| 12.5 | **회귀 테스트 — SHORT 편향 제거**: 동일 시나리오에서 LONG/SHORT 진입 비율 편향 없음 | 합성 캔들에서 대칭적 조건 → LONG/SHORT 신호 수 동등 (±10%) | 12.2 | cc:TODO |
+| 12.5 | **회귀 테스트 — SHORT 편향 제거**: 동일 시나리오에서 LONG/SHORT 진입 비율 편향 없음 | 합성 캔들에서 대칭적 조건 → LONG/SHORT 신호 수 동등 (±10%) | 12.2 | cc:완了 |
 | 12.6 | `tests/test_pattern_scalper.py` — v12 패턴별 진입/청산/트레일링/V12State 동작 | 7패턴 중 핵심 3패턴 + 트레일링 업데이트 + partial_tp 동작 검증 | 12.1 | cc:완了 |
 | 12.7 | `tests/test_binance_client.py` — mock aiohttp 으로 client 메서드 계약 테스트 | get_candles/place_order/get_balance 응답 파싱 정상 + 에러 핸들링 | 12.1 | cc:완了 |
 | 12.8 | `tests/test_strategy_agent.py` — LLM 호출 mock, 생성→검증→등록 파이프라인 | _generate_new_strategy, _validate_and_register 각각 mock 으로 pass/fail 경로 커버 | 12.1 | cc:완了 |
@@ -167,7 +167,7 @@
 | Task | 내용 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
 | 15.1 | **BinanceClient 확장** — `get_order_book(symbol, depth)`, `get_funding_rate(symbol)`, `get_open_interest(symbol)` 메서드 추가 + 테스트 먼저 | `tests/test_binance_client.py` 신규 메서드 테스트 pass, 실거래 호출 스모크 OK | 12.7 | cc:완了 |
-| 15.2 | **멀티 TF 프레임워크 정비** — 현재 15m+1h 고정을 Strategy 속성으로 선언적 지정 (`TIMEFRAMES = ["5m","15m","1h"]`) | base.py Strategy에 TIMEFRAMES 속성, 엔진이 자동 조회/주입, 기존 전략 마이그레이션 | 12.2 | cc:TODO |
+| 15.2 | **멀티 TF 프레임워크 정비** — 현재 15m+1h 고정을 Strategy 속성으로 선언적 지정 (`TIMEFRAMES = ["5m","15m","1h"]`) | base.py Strategy에 TIMEFRAMES 속성, 엔진이 자동 조회/주입, 기존 전략 마이그레이션 | 12.2 | cc:완了 |
 | 15.3 | **오더북 불균형 피처** 계산 유틸 (`src/strategies/features/orderbook.py`) + 단위 테스트 | bid/ask 깊이 비율, 스프레드, 대규모 주문벽 탐지 함수 + 테스트 pass | 15.1 | cc:TODO |
 | 15.4 | **펀딩비 & OI 피처** — funding rate 추세 + OI 변화율 유틸 + 단위 테스트 | `src/strategies/features/derivatives.py` + 테스트 pass | 15.1 | cc:TODO |
 | 15.5 | **v13 전략 초안 구현** (`src/strategies/orderflow_v13.py`) — 멀티 TF 추세 일치 + 오더북 불균형 + 펀딩비 극단치 진입 | 전략 등록, 단위 테스트 pass, 백테스트 30일 실행 성공 | 15.2, 15.3, 15.4, 12.1 | cc:TODO |

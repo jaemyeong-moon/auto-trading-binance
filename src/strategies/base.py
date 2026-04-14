@@ -24,6 +24,7 @@ class Strategy(ABC):
     LEVERAGE: int = 5                   # 레버리지 배수
     POSITION_SIZE_PCT: float = 0.20     # 잔고 대비 투자 비율
     MAX_HOLD_HOURS: float = 4.0         # 최대 보유 시간 (시간)
+    TIMEFRAMES: list[str] = ["15m", "1h"]  # [주 TF, HTF] 순서
 
     # ATR 기반 SL/TP (0이면 전략 자체 관리)
     SL_ATR_MULT: float = 2.0

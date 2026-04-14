@@ -325,11 +325,24 @@ class FuturesEngine:
         """각 심볼의 재시작 상태 반환."""
         return dict(self._restart_status)
 
-    async def _fetch_candles(self, symbol: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """15분봉(메인) + 1시간봉(HTF) 매 틱."""
-        candles_15m = await self.client.get_candles(symbol, interval="15m", limit=200)
-        htf_candles = await self.client.get_candles(symbol, interval="1h", limit=250)
-        return candles_15m, htf_candles
+    async def _fetch_candles(self, symbol: str, strategy: Strategy) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """전략의 TIMEFRAMES 설정에서 주 TF + HTF 캔들 매 틱 조회.
+
+        TIMEFRAMES[0] = 주 타임프레임 (candles),
+        TIMEFRAMES[1] = 상위 타임프레임 (htf_candles).
+        3개 이상이면 두 번째만 htf_candles로 사용. 반환 형식은 항상 tuple[DataFrame, DataFrame].
+        """
+        timeframes = getattr(strategy, "TIMEFRAMES", ["15m", "1h"])
+        primary_tf = timeframes[0]
+        htf_tf = timeframes[1] if len(timeframes) >= 2 else "1h"
+
+        # 3개 이상 지정된 경우 모두 조회 (부수 효과: 캐시 등)
+        for tf in timeframes[2:]:
+            await self.client.get_candles(symbol, interval=tf, limit=100)
+
+        candles = await self.client.get_candles(symbol, interval=primary_tf, limit=200)
+        htf_candles = await self.client.get_candles(symbol, interval=htf_tf, limit=250)
+        return candles, htf_candles
 
     def _record_trail(self, symbol: str, pos: dict, price: float) -> None:
         """실거래 포지션 궤적 기록."""
@@ -347,7 +360,7 @@ class FuturesEngine:
             logger.debug("engine.trail_record_failed", symbol=symbol)
 
     async def _tick_always_flip(self, symbol: str, strategy: Strategy) -> None:
-        candles, htf = await self._fetch_candles(symbol)
+        candles, htf = await self._fetch_candles(symbol, strategy)
         if candles.empty:
             return
 
@@ -411,7 +424,7 @@ class FuturesEngine:
     # ═══════════════════════════════════════════════════════
 
     async def _tick_signal_only(self, symbol: str, strategy: Strategy) -> None:
-        candles, htf = await self._fetch_candles(symbol)
+        candles, htf = await self._fetch_candles(symbol, strategy)
         if candles.empty:
             return
 
@@ -640,9 +653,24 @@ class FuturesEngine:
         leverage = getattr(strategy, "LEVERAGE", 5)
         size_pct = getattr(strategy, "POSITION_SIZE_PCT", 0.20)
 
+        # ATR 동적 포지션 사이징 — signal metadata에서 ATR 가져오기
+        # (없으면 0 → RiskManager가 기본 size_pct 그대로 사용)
+        _last_signal = getattr(strategy, "_last_signal", None)
+        atr = 0.0
+        if _last_signal is not None and hasattr(_last_signal, "metadata"):
+            atr = float(_last_signal.metadata.get("atr", 0) or 0)
+        # atr_baseline = atr: 정상 시장에서 scalar=1.0, 변동성 2× → scalar=0.5
+        atr_baseline = atr
+
         # 안전장치: 가용 잔고의 90%를 넘지 않도록 (증거금 여유)
         max_invest = balance * 0.9
-        invest = min(balance * size_pct, max_invest)
+        invest_raw = self._risk_manager.position_size(
+            balance=balance,
+            strategy_pct=size_pct,
+            atr=atr,
+            atr_baseline=atr_baseline,
+        )
+        invest = min(invest_raw, max_invest)
         quantity = (invest * leverage) / price
         quantity = self._round_qty(symbol, quantity)
 
