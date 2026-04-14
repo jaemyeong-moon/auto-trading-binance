@@ -121,7 +121,7 @@
 | Task | 내용 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
 | 12.0 | **베이스라인 수리** — 사전 깨진 테스트 3건 + 환경 정비 | (a) `test_aggressive_scalper.py` v9 재작성 or 제거, (b) adaptive/smart scalper cooldown→blocked_hour 반영 업데이트, (c) pytest-asyncio 설치 안내 or requirements 보강, (d) `pytest -q` 녹색 확인 | - | cc:완了 |
-| 12.1 | `tests/conftest.py` 작성 — 공통 fixture (mock BinanceClient, 샘플 candles, TradingConfig, 임시 DB) | `pytest --collect-only` 에 fixture 인식, 기존 테스트 전부 통과 유지 | 12.0 | cc:TODO |
+| 12.1 | `tests/conftest.py` 작성 — 공통 fixture (mock BinanceClient, 샘플 candles, TradingConfig, 임시 DB) | `pytest --collect-only` 에 fixture 인식, 기존 테스트 전부 통과 유지 | 12.0 | cc:완了 |
 | 12.2 | `tests/test_futures_engine.py` — 엔진 tick 루프 단위 테스트 (mock client) | tick 1회당 candles 조회→evaluate→signal→order 경로 커버, 정상/에러 케이스 3개 이상 | 12.0, 12.1 | cc:TODO |
 | 12.3 | **회귀 테스트 — MAX_HOLD_HOURS**: 전략별 max_hold 초과 시 강제 청산 호출 확인 | 전략 속성값(v1/v12 등) 기준으로 정확히 청산 트리거됨을 검증하는 테스트 pass | 12.2 | cc:TODO |
 | 12.4 | **회귀 테스트 — 레버리지 DB/전략 동기화**: 엔진이 `getattr(strategy, "LEVERAGE", 5)` 올바르게 읽고 바이낸스 호출에 반영 | mock client 에 setLeverage 호출 기록 확인, 전략별 값이 넘어감 | 12.2 | cc:TODO |
