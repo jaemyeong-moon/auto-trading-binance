@@ -122,13 +122,13 @@
 |------|------|-----|---------|--------|
 | 12.0 | **베이스라인 수리** — 사전 깨진 테스트 3건 + 환경 정비 | (a) `test_aggressive_scalper.py` v9 재작성 or 제거, (b) adaptive/smart scalper cooldown→blocked_hour 반영 업데이트, (c) pytest-asyncio 설치 안내 or requirements 보강, (d) `pytest -q` 녹색 확인 | - | cc:완了 |
 | 12.1 | `tests/conftest.py` 작성 — 공통 fixture (mock BinanceClient, 샘플 candles, TradingConfig, 임시 DB) | `pytest --collect-only` 에 fixture 인식, 기존 테스트 전부 통과 유지 | 12.0 | cc:완了 |
-| 12.2 | `tests/test_futures_engine.py` — 엔진 tick 루프 단위 테스트 (mock client) | tick 1회당 candles 조회→evaluate→signal→order 경로 커버, 정상/에러 케이스 3개 이상 | 12.0, 12.1 | cc:TODO |
+| 12.2 | `tests/test_futures_engine.py` — 엔진 tick 루프 단위 테스트 (mock client) | tick 1회당 candles 조회→evaluate→signal→order 경로 커버, 정상/에러 케이스 3개 이상 | 12.0, 12.1 | cc:완了 |
 | 12.3 | **회귀 테스트 — MAX_HOLD_HOURS**: 전략별 max_hold 초과 시 강제 청산 호출 확인 | 전략 속성값(v1/v12 등) 기준으로 정확히 청산 트리거됨을 검증하는 테스트 pass | 12.2 | cc:TODO |
 | 12.4 | **회귀 테스트 — 레버리지 DB/전략 동기화**: 엔진이 `getattr(strategy, "LEVERAGE", 5)` 올바르게 읽고 바이낸스 호출에 반영 | mock client 에 setLeverage 호출 기록 확인, 전략별 값이 넘어감 | 12.2 | cc:TODO |
 | 12.5 | **회귀 테스트 — SHORT 편향 제거**: 동일 시나리오에서 LONG/SHORT 진입 비율 편향 없음 | 합성 캔들에서 대칭적 조건 → LONG/SHORT 신호 수 동등 (±10%) | 12.2 | cc:TODO |
-| 12.6 | `tests/test_pattern_scalper.py` — v12 패턴별 진입/청산/트레일링/V12State 동작 | 7패턴 중 핵심 3패턴 + 트레일링 업데이트 + partial_tp 동작 검증 | 12.1 | cc:TODO |
-| 12.7 | `tests/test_binance_client.py` — mock aiohttp 으로 client 메서드 계약 테스트 | get_candles/place_order/get_balance 응답 파싱 정상 + 에러 핸들링 | 12.1 | cc:TODO |
-| 12.8 | `tests/test_strategy_agent.py` — LLM 호출 mock, 생성→검증→등록 파이프라인 | _generate_new_strategy, _validate_and_register 각각 mock 으로 pass/fail 경로 커버 | 12.1 | cc:TODO |
+| 12.6 | `tests/test_pattern_scalper.py` — v12 패턴별 진입/청산/트레일링/V12State 동작 | 7패턴 중 핵심 3패턴 + 트레일링 업데이트 + partial_tp 동작 검증 | 12.1 | cc:완了 |
+| 12.7 | `tests/test_binance_client.py` — mock aiohttp 으로 client 메서드 계약 테스트 | get_candles/place_order/get_balance 응답 파싱 정상 + 에러 핸들링 | 12.1 | cc:완了 |
+| 12.8 | `tests/test_strategy_agent.py` — LLM 호출 mock, 생성→검증→등록 파이프라인 | _generate_new_strategy, _validate_and_register 각각 mock 으로 pass/fail 경로 커버 | 12.1 | cc:완了 |
 | 12.9 | 커버리지 리포트 집계 — `pytest --cov=src` 실행, 주요 모듈 50%+ 목표 | engine/strategies/exchange 50%+, 커버리지 HTML 리포트 생성 | 12.2, 12.6, 12.7, 12.8 | cc:TODO |
 | 12.10 | CI 훅 또는 로컬 pre-push 스크립트 — 테스트 실패 시 push 차단 | `scripts/test_gate.sh` (또는 pre-commit hook) 동작 확인 | 12.9 | cc:TODO |
 
@@ -138,7 +138,7 @@
 
 | Task | 내용 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 13.1 | `src/core/risk_manager.py` 신설 + 단위 테스트 먼저 (`tests/test_risk_manager.py`) — 포지션 사이징/동시포지션/DD 차단 인터페이스 | 테스트 pass, RiskManager 클래스 API 확정 (can_open, position_size, daily_dd_ok) | 12.1 | cc:TODO |
+| 13.1 | `src/core/risk_manager.py` 신설 + 단위 테스트 먼저 (`tests/test_risk_manager.py`) — 포지션 사이징/동시포지션/DD 차단 인터페이스 | 테스트 pass, RiskManager 클래스 API 확정 (can_open, position_size, daily_dd_ok) | 12.1 | cc:완了 |
 | 13.2 | **max_open_positions 실제 적용** — 엔진이 현재 포지션 수 확인 후 진입 차단 | TradingConfig.max_open_positions=3 초과 시 로그 + 거부, 테스트로 검증 | 13.1 | cc:TODO |
 | 13.3 | **일일 최대 DD 자동 차단** — 일일 손실이 `max_daily_loss_pct`(신규 설정) 초과 시 당일 신규 진입 정지 | DB에서 당일 손익 집계 → 한도 초과 시 RiskManager.can_open=False, 테스트 pass | 13.1 | cc:TODO |
 | 13.4 | **변동성(ATR) 기반 동적 포지션 사이징** — 고ATR 구간에서 사이즈 축소 | 기존 POSITION_SIZE_PCT에 ATR 계수 곱, 백테스트에서 최대 드로다운 감소 검증 | 13.1 | cc:TODO |
