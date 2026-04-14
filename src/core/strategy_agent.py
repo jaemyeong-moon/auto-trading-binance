@@ -40,6 +40,10 @@ EVAL_LOOKBACK_HOURS = 24          # 최근 24시간 거래 평가
 MAX_AI_STRATEGIES = 5             # 최대 AI 생성 전략 수 (디스크 절약)
 MAX_FIX_ATTEMPTS = 3              # 코드 검증 실패 시 최대 재시도 횟수
 
+# ─── 백테스트 게이트 기준 ─────────────────────────────────
+MIN_WIN_RATE = 0.45               # 백테스트 최소 승률 (45%)
+MIN_PROFIT_FACTOR = 1.1           # 백테스트 최소 손익비
+
 
 @dataclass
 class PerformanceReport:
@@ -475,7 +479,13 @@ def _load_strategy_module(filepath: Path, strategy_name: str) -> tuple[bool, str
 
 def _run_backtest_validation(strategy_name: str,
                              candles: pd.DataFrame) -> tuple[bool, dict]:
-    """백테스트로 전략 기본 동작 검증."""
+    """백테스트로 전략 기본 동작 검증.
+
+    통과 기준:
+    - 최소 3건 이상 거래
+    - 승률 MIN_WIN_RATE(45%) 이상
+    - 손익비(Profit Factor) MIN_PROFIT_FACTOR(1.1) 이상
+    """
     from src.backtesting.backtest import Backtester
 
     try:
@@ -483,9 +493,19 @@ def _run_backtest_validation(strategy_name: str,
         bt = Backtester(strategy, initial_capital=10000.0)
         result = bt.run("BTCUSDT", candles)
 
+        # Profit Factor = 총 이익 / 총 손실 (절대값)
+        gross_profit = sum(t.pnl for t in result.trades if t.pnl > 0)
+        gross_loss = abs(sum(t.pnl for t in result.trades if t.pnl <= 0))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else (
+            float("inf") if gross_profit > 0 else 0.0
+        )
+
+        win_rate_ratio = result.win_rate / 100.0  # BacktestResult.win_rate는 % 단위
+
         summary = {
             "total_trades": result.total_trades,
             "win_rate": result.win_rate,
+            "profit_factor": round(profit_factor, 3),
             "total_return_pct": round(result.total_return_pct, 2),
             "max_drawdown_pct": round(result.max_drawdown_pct, 2),
             "sharpe_ratio": round(result.sharpe_ratio, 2),
@@ -493,11 +513,32 @@ def _run_backtest_validation(strategy_name: str,
 
         # 최소한 거래가 발생해야 유효
         if result.total_trades < 3:
+            logger.info("agent.backtest_gate_rejected",
+                        strategy=strategy_name, reason="too_few_trades",
+                        total_trades=result.total_trades)
             return False, {**summary, "error": "Too few trades in backtest"}
+
+        # 승률 기준 미달
+        if win_rate_ratio < MIN_WIN_RATE:
+            logger.info("agent.backtest_gate_rejected",
+                        strategy=strategy_name, reason="low_win_rate",
+                        win_rate=result.win_rate, min_win_rate=MIN_WIN_RATE * 100)
+            return False, {**summary,
+                           "error": f"Win rate {result.win_rate:.1f}% < {MIN_WIN_RATE * 100:.0f}% minimum"}
+
+        # 손익비 기준 미달
+        if profit_factor < MIN_PROFIT_FACTOR:
+            logger.info("agent.backtest_gate_rejected",
+                        strategy=strategy_name, reason="low_profit_factor",
+                        profit_factor=profit_factor, min_profit_factor=MIN_PROFIT_FACTOR)
+            return False, {**summary,
+                           "error": f"Profit factor {profit_factor:.3f} < {MIN_PROFIT_FACTOR} minimum"}
 
         return True, summary
     except Exception:
         tb = traceback.format_exc()
+        logger.info("agent.backtest_gate_rejected",
+                    strategy=strategy_name, reason="exception", error=tb[:200])
         return False, {"error": f"Backtest failed:\n{tb}"}
 
 

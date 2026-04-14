@@ -319,6 +319,94 @@ def get_trades(symbol: str | None = None, limit: int = 100) -> list[TradeRecord]
         return q.limit(limit).all()
 
 
+# ─── Risk status helper ────────────────────────────────────
+
+def get_risk_status(
+    balance: float = 0.0,
+    max_open_positions: int = 3,
+    max_daily_loss_pct: float = 0.05,
+    kelly_lookback: int = 50,
+) -> dict:
+    """당일 리스크 상태를 집계하여 반환.
+
+    외부 서비스 없이 DB 데이터만으로 계산하므로 대시보드/테스트에서
+    바로 호출할 수 있다.
+
+    Args:
+        balance: 현재 계좌 잔고 (USDT). 0이면 daily_pnl_pct는 0 처리.
+        max_open_positions: 최대 동시 포지션 수 (설정값).
+        max_daily_loss_pct: 일일 최대 DD 비율 (설정값).
+        kelly_lookback: Kelly 계산에 사용할 최근 거래 수.
+
+    Returns:
+        dict with keys:
+            daily_pnl (float)       — 당일 PnL (USDT)
+            daily_pnl_pct (float)   — 당일 PnL (잔고 대비 비율, 0~1 범위)
+            daily_dd_ok (bool)      — DD 한도 내 여부
+            open_positions (int)    — 현재 열린 포지션 수
+            max_positions (int)     — 최대 허용 포지션 수
+            can_open (bool)         — 진입 가능 여부
+            kelly_sizes (dict)      — 전략별 Kelly 추천 사이즈 {strategy: float}
+    """
+    from src.core.risk_manager import RiskManager
+
+    # ── 당일 PnL ──
+    daily_pnl, _ = get_today_pnl()
+    daily_pnl_pct = (daily_pnl / balance) if balance > 0 else 0.0
+
+    # ── 현재 포지션 수 ──
+    open_pos_list = get_open_positions()
+    open_positions = len(open_pos_list)
+
+    # ── RiskManager 판단 ──
+    rm = RiskManager(
+        max_open_positions=max_open_positions,
+        max_daily_loss_pct=max_daily_loss_pct,
+    )
+    can_open, _ = rm.can_open(open_positions, daily_pnl_pct)
+    dd_ok = rm.daily_dd_ok(daily_pnl_pct)
+
+    # ── 전략별 Kelly 계산 ──
+    trades = get_trades(limit=kelly_lookback)
+    kelly_sizes: dict[str, float] = {}
+    if trades:
+        # 전략별로 그룹핑
+        strategy_trades: dict[str, list[TradeRecord]] = {}
+        for t in trades:
+            strat = t.strategy or "unknown"
+            strategy_trades.setdefault(strat, []).append(t)
+
+        for strat, strat_trades in strategy_trades.items():
+            wins = [t for t in strat_trades if (t.pnl_pct or 0.0) > 0]
+            losses = [t for t in strat_trades if (t.pnl_pct or 0.0) <= 0]
+            if not strat_trades:
+                continue
+            win_rate = len(wins) / len(strat_trades)
+            avg_win = (
+                sum(abs(t.pnl_pct or 0.0) for t in wins) / len(wins) / 100.0
+                if wins else 0.0
+            )
+            avg_loss = (
+                sum(abs(t.pnl_pct or 0.0) for t in losses) / len(losses) / 100.0
+                if losses else 0.0
+            )
+            # Skip Kelly when there are no wins (avg_win=0 causes division by zero)
+            if avg_win > 0:
+                kelly_sizes[strat] = rm.kelly_size(win_rate, avg_win, avg_loss)
+            else:
+                kelly_sizes[strat] = 0.0
+
+    return {
+        "daily_pnl": daily_pnl,
+        "daily_pnl_pct": daily_pnl_pct,
+        "daily_dd_ok": dd_ok,
+        "open_positions": open_positions,
+        "max_positions": max_open_positions,
+        "can_open": can_open,
+        "kelly_sizes": kelly_sizes,
+    }
+
+
 # ─── Bot state helpers ─────────────────────────────────────
 
 def set_bot_running(symbol: str, running: bool) -> None:

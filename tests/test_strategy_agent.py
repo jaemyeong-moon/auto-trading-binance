@@ -12,12 +12,15 @@ import pytest
 
 from src.core.strategy_agent import (
     MAX_FIX_ATTEMPTS,
+    MIN_PROFIT_FACTOR,
     MIN_TRADES_FOR_EVAL,
+    MIN_WIN_RATE,
     POOR_PNL_THRESHOLD,
     POOR_WIN_RATE,
     AgentReport,
     PerformanceReport,
     _extract_code_block,
+    _run_backtest_validation,
     _validate_no_dangerous_code,
     _validate_strategy_structure,
     _validate_syntax,
@@ -701,6 +704,197 @@ class TestGenerateNewStrategyPipeline:
         report = await agent.run(candles_for_backtest=None)
         assert report.action_taken == "strategy_switched"
         assert report.backtest_result == {}
+
+
+class TestBacktestGate:
+    """Task 16.3 — 백테스트 게이트: 최소 승률/손익비 필터링 테스트."""
+
+    def _make_backtest_result(self, wins: list[float], losses: list[float]):
+        """Backtester.run()이 반환하는 BacktestResult 형태의 mock 생성."""
+        from src.backtesting.backtest import BacktestResult, BacktestTrade
+        from datetime import datetime
+
+        trades = []
+        for pnl in wins:
+            trades.append(BacktestTrade(
+                symbol="BTCUSDT", side="SELL",
+                entry_price=100.0, exit_price=110.0,
+                entry_time=datetime(2024, 1, 1), exit_time=datetime(2024, 1, 2),
+                quantity=1.0, pnl=pnl, pnl_pct=10.0,
+            ))
+        for pnl in losses:
+            trades.append(BacktestTrade(
+                symbol="BTCUSDT", side="SELL",
+                entry_price=100.0, exit_price=90.0,
+                entry_time=datetime(2024, 1, 1), exit_time=datetime(2024, 1, 2),
+                quantity=1.0, pnl=pnl, pnl_pct=-10.0,
+            ))
+        total = len(wins) + len(losses)
+        win_rate = (len(wins) / total * 100) if total > 0 else 0.0
+        return BacktestResult(
+            strategy_name="ai_test_gate",
+            symbol="BTCUSDT",
+            start_date=datetime(2024, 1, 1),
+            end_date=datetime(2024, 2, 1),
+            initial_capital=10000.0,
+            final_capital=10000.0 + sum(wins) + sum(losses),
+            total_trades=total,
+            winning_trades=len(wins),
+            losing_trades=len(losses),
+            win_rate=win_rate,
+            total_return_pct=0.0,
+            max_drawdown_pct=0.0,
+            sharpe_ratio=0.0,
+            trades=trades,
+            equity_curve=[10000.0],
+        )
+
+    def test_gate_passes_with_good_win_rate_and_pf(self, monkeypatch):
+        """승률 50%, PF 1.5 → 통과 (전략 등록됨)."""
+        # wins: 5 * 30 = 150, losses: 5 * (-20) = -100 → PF = 1.5
+        mock_result = self._make_backtest_result(
+            wins=[30.0] * 5, losses=[-20.0] * 5
+        )
+        # win_rate = 50%, PF = 150/100 = 1.5
+
+        from src.backtesting.backtest import Backtester
+        from unittest.mock import MagicMock
+
+        mock_backtester = MagicMock(spec=Backtester)
+        mock_backtester.run.return_value = mock_result
+
+        monkeypatch.setattr(
+            "src.core.strategy_agent.get_strategy",
+            lambda name: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "src.core.strategy_agent.Backtester" if False else "src.backtesting.backtest.Backtester",
+            MagicMock(return_value=mock_backtester),
+        )
+
+        # Patch Backtester inside strategy_agent module namespace
+        import src.core.strategy_agent as sa_module
+        import src.backtesting.backtest as bt_module
+        original_backtester = bt_module.Backtester
+        bt_module.Backtester = MagicMock(return_value=mock_backtester)
+        try:
+            candles = pd.DataFrame(
+                {"open": [1.0] * 200, "high": [1.0] * 200,
+                 "low": [1.0] * 200, "close": [1.0] * 200, "volume": [1.0] * 200},
+            )
+            ok, summary = _run_backtest_validation("ai_test_gate", candles)
+        finally:
+            bt_module.Backtester = original_backtester
+
+        assert ok is True
+        assert "error" not in summary
+        assert summary["win_rate"] == pytest.approx(50.0)
+        assert summary["profit_factor"] == pytest.approx(1.5)
+
+    def test_gate_rejects_low_win_rate_and_low_pf(self, monkeypatch):
+        """승률 30%, PF 0.8 → 폐기 (전략 미등록)."""
+        # wins: 3 * 16 = 48, losses: 7 * (-10) = -70 → PF = 48/70 ≈ 0.686
+        mock_result = self._make_backtest_result(
+            wins=[16.0] * 3, losses=[-10.0] * 7
+        )
+        # win_rate = 30%, PF < 1.0
+
+        import src.backtesting.backtest as bt_module
+        from unittest.mock import MagicMock
+
+        mock_backtester = MagicMock()
+        mock_backtester.run.return_value = mock_result
+        original_backtester = bt_module.Backtester
+        bt_module.Backtester = MagicMock(return_value=mock_backtester)
+
+        monkeypatch.setattr(
+            "src.core.strategy_agent.get_strategy",
+            lambda name: MagicMock(),
+        )
+
+        try:
+            candles = pd.DataFrame(
+                {"open": [1.0] * 200, "high": [1.0] * 200,
+                 "low": [1.0] * 200, "close": [1.0] * 200, "volume": [1.0] * 200},
+            )
+            ok, summary = _run_backtest_validation("ai_test_gate_fail", candles)
+        finally:
+            bt_module.Backtester = original_backtester
+
+        assert ok is False
+        assert "error" in summary
+        # Rejected on win_rate (30% < 45%)
+        assert "win_rate" in summary["error"].lower() or "30" in summary["error"]
+
+    def test_gate_rejects_good_win_rate_but_low_pf(self, monkeypatch):
+        """승률 45%, PF 1.0 → 폐기 (PF 미달)."""
+        # wins: 9 * 10 = 90, losses: 11 * (-9) = -99 → PF = 90/99 ≈ 0.909
+        # But we want exactly win_rate=45% and PF=1.0 (boundary fail)
+        # wins: 9 * 11 = 99, losses: 11 * (-9) = -99 → PF = 99/99 = 1.0 (< 1.1)
+        mock_result = self._make_backtest_result(
+            wins=[11.0] * 9, losses=[-9.0] * 11
+        )
+        # win_rate = 9/20 = 45%, PF = 99/99 = 1.0 < 1.1
+
+        import src.backtesting.backtest as bt_module
+        from unittest.mock import MagicMock
+
+        mock_backtester = MagicMock()
+        mock_backtester.run.return_value = mock_result
+        original_backtester = bt_module.Backtester
+        bt_module.Backtester = MagicMock(return_value=mock_backtester)
+
+        monkeypatch.setattr(
+            "src.core.strategy_agent.get_strategy",
+            lambda name: MagicMock(),
+        )
+
+        try:
+            candles = pd.DataFrame(
+                {"open": [1.0] * 200, "high": [1.0] * 200,
+                 "low": [1.0] * 200, "close": [1.0] * 200, "volume": [1.0] * 200},
+            )
+            ok, summary = _run_backtest_validation("ai_test_gate_pf_fail", candles)
+        finally:
+            bt_module.Backtester = original_backtester
+
+        assert ok is False
+        assert "error" in summary
+        # win_rate = 45% passes, but PF = 1.0 < MIN_PROFIT_FACTOR(1.1)
+        assert "profit_factor" in summary["error"].lower() or "1.0" in summary["error"]
+
+    def test_gate_rejects_on_backtest_exception(self, monkeypatch):
+        """백테스트 실행 에러 → 폐기."""
+        import src.backtesting.backtest as bt_module
+        from unittest.mock import MagicMock
+
+        mock_backtester = MagicMock()
+        mock_backtester.run.side_effect = RuntimeError("Simulated backtest crash")
+        original_backtester = bt_module.Backtester
+        bt_module.Backtester = MagicMock(return_value=mock_backtester)
+
+        monkeypatch.setattr(
+            "src.core.strategy_agent.get_strategy",
+            lambda name: MagicMock(),
+        )
+
+        try:
+            candles = pd.DataFrame(
+                {"open": [1.0] * 200, "high": [1.0] * 200,
+                 "low": [1.0] * 200, "close": [1.0] * 200, "volume": [1.0] * 200},
+            )
+            ok, summary = _run_backtest_validation("ai_test_gate_exc", candles)
+        finally:
+            bt_module.Backtester = original_backtester
+
+        assert ok is False
+        assert "error" in summary
+        assert "Backtest failed" in summary["error"] or "Simulated" in summary["error"]
+
+    def test_gate_constants_are_defined(self):
+        """MIN_WIN_RATE, MIN_PROFIT_FACTOR 상수가 올바른 값으로 정의되어 있음."""
+        assert MIN_WIN_RATE == pytest.approx(0.45)
+        assert MIN_PROFIT_FACTOR == pytest.approx(1.1)
 
 
 class TestValidateAndRegisterPath:

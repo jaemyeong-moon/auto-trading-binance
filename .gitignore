@@ -30,3 +30,8 @@ models/*.joblib
 # OS
 .DS_Store
 Thumbs.db
+
+# Coverage
+htmlcov/
+.coverage
+.coverage.*

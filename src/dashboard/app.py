@@ -798,6 +798,60 @@ if page == "실시간 현황":
 
     st.divider()
 
+    # ── 리스크 상태 카드 ──
+    st.subheader("리스크 현황")
+    try:
+        _balance = account.get("balance", 0.0)
+        _risk = db.get_risk_status(
+            balance=_balance,
+            max_open_positions=3,
+            max_daily_loss_pct=0.05,
+        )
+        r1, r2, r3, r4 = st.columns(4)
+
+        # 당일 DD 진행률
+        _daily_pnl = _risk["daily_pnl"]
+        _daily_pnl_pct = _risk["daily_pnl_pct"]
+        _dd_ok = _risk["daily_dd_ok"]
+        _dd_used_pct = max(0.0, -_daily_pnl_pct)  # 손실만 표시 (0 ~ max)
+        _dd_limit_pct = 0.05
+
+        r1.metric(
+            "당일 손익",
+            f"${_daily_pnl:+,.2f}",
+            delta=f"{_daily_pnl_pct * 100:+.2f}%",
+            delta_color="normal" if _daily_pnl >= 0 else "inverse",
+        )
+
+        with r2:
+            st.markdown("**일일 DD 한도**")
+            _dd_bar_val = min(1.0, _dd_used_pct / _dd_limit_pct) if _dd_limit_pct > 0 else 0.0
+            st.progress(_dd_bar_val, text=f"{_dd_used_pct * 100:.2f}% / {_dd_limit_pct * 100:.0f}%")
+            if _dd_ok:
+                st.success("한도 내")
+            else:
+                st.error("한도 초과 — 신규 진입 차단")
+
+        r3.metric(
+            "포지션",
+            f"{_risk['open_positions']} / {_risk['max_positions']}",
+            delta="진입 가능" if _risk["can_open"] else "진입 차단",
+            delta_color="normal" if _risk["can_open"] else "inverse",
+        )
+
+        with r4:
+            st.markdown("**Kelly 추천 사이즈**")
+            _kelly = _risk["kelly_sizes"]
+            if _kelly:
+                for _strat, _sz in _kelly.items():
+                    st.caption(f"{_strat}: {_sz * 100:.1f}%")
+            else:
+                st.caption("거래 데이터 없음")
+    except Exception as _e:
+        st.warning(f"리스크 상태 조회 실패: {_e}")
+
+    st.divider()
+
     # ── 심볼별 상세 ──
     for symbol in display_symbols:
         sd = sym_data.get(symbol, {})
