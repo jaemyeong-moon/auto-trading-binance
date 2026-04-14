@@ -688,6 +688,7 @@ class AIStrategyAgent:
                 err_msg = "No ```python code block found in response."
                 all_errors.append(f"[attempt {attempt}] {err_msg}")
                 logger.warning("agent.no_code_block", attempt=attempt)
+                db.log_agent_swap("rejected", "unknown", reason="no_code_block")
                 conversation.append(Message("user", _build_fix_prompt(
                     err_msg,
                     "응답에 ```python 코드 블록이 없습니다. "
@@ -695,16 +696,21 @@ class AIStrategyAgent:
                 )))
                 continue
 
+            db.log_agent_swap("generated", "unknown")
+
             # 검증 파이프라인
             validation_error = self._run_validation_pipeline(code)
             if validation_error:
                 all_errors.append(f"[attempt {attempt}] {validation_error}")
                 logger.warning("agent.validation_failed",
                                attempt=attempt, error=validation_error)
+                db.log_agent_swap("rejected", "unknown", reason=validation_error[:200])
                 conversation.append(Message("user", _build_fix_prompt(
                     validation_error, code,
                 )))
                 continue
+
+            db.log_agent_swap("validated", "unknown")
 
             # 전략 이름 추출
             strategy_name = self._extract_strategy_name(code)
@@ -714,6 +720,7 @@ class AIStrategyAgent:
                     'The name property must return a string starting with "ai_".'
                 )
                 all_errors.append(f"[attempt {attempt}] {err_msg}")
+                db.log_agent_swap("rejected", "unknown", reason="no_strategy_name")
                 conversation.append(Message("user", _build_fix_prompt(
                     err_msg, code,
                 )))
@@ -746,6 +753,12 @@ class AIStrategyAgent:
                     logger.warning("agent.backtest_failed",
                                    attempt=attempt, result=backtest_result)
 
+                    db.log_agent_swap(
+                        "rejected", strategy_name, reason=bt_err[:200],
+                        win_rate=backtest_result.get("win_rate"),
+                        profit_factor=backtest_result.get("profit_factor"),
+                    )
+
                     # 레지스트리에서 제거 후 재시도
                     if strategy_name in _REGISTRY:
                         del _REGISTRY[strategy_name]
@@ -762,6 +775,11 @@ class AIStrategyAgent:
 
             # 모든 검증 통과 — 전략 교체
             db.set_setting("strategy", strategy_name)
+            db.log_agent_swap(
+                "deployed", strategy_name,
+                win_rate=backtest_result.get("win_rate"),
+                profit_factor=backtest_result.get("profit_factor"),
+            )
             _cleanup_old_strategies()
 
             logger.info("agent.strategy_switched",

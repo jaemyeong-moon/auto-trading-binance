@@ -108,6 +108,15 @@ def freeze_now(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def mock_log_agent_swap(monkeypatch):
+    """Mock log_agent_swap to avoid DB access in all strategy agent tests."""
+    monkeypatch.setattr(
+        "src.core.strategy_agent.db.log_agent_swap",
+        lambda *args, **kwargs: None,
+    )
+
+
 class TestAnalyzePerformance:
     def _patch_db(self, monkeypatch, trades, strategy_name="test_strategy"):
         monkeypatch.setattr("src.core.strategy_agent.db.get_setting",

@@ -172,6 +172,19 @@ class BotSettings(Base):
     value = Column(String, nullable=False)
 
 
+class AgentSwapLog(Base):
+    """AI 에이전트 전략 생성/검증/배포/거부 감사 로그."""
+    __tablename__ = "agent_swap_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime, default=now_kst)
+    action = Column(String, nullable=False)      # generated, validated, deployed, rejected
+    strategy_name = Column(String, nullable=False)
+    reason = Column(String, nullable=True)
+    win_rate = Column(Float, nullable=True)
+    profit_factor = Column(Float, nullable=True)
+
+
 def _set_sqlite_pragmas(dbapi_conn, _connection_record):
     """SQLite WAL 모드 + busy_timeout 설정 — 다중 프로세스 접근 시 잠금 방지."""
     cursor = dbapi_conn.cursor()
@@ -317,6 +330,28 @@ def get_trades(symbol: str | None = None, limit: int = 100) -> list[TradeRecord]
         if symbol:
             q = q.filter_by(symbol=symbol)
         return q.limit(limit).all()
+
+
+# ─── Agent swap log helper ─────────────────────────────────
+
+
+def log_agent_swap(
+    action: str,
+    strategy_name: str,
+    reason: str | None = None,
+    win_rate: float | None = None,
+    profit_factor: float | None = None,
+) -> None:
+    """AI 에이전트 전략 이벤트를 감사 로그에 기록."""
+    with get_session() as session:
+        session.add(AgentSwapLog(
+            action=action,
+            strategy_name=strategy_name,
+            reason=reason,
+            win_rate=win_rate,
+            profit_factor=profit_factor,
+        ))
+        session.commit()
 
 
 # ─── Risk status helper ────────────────────────────────────

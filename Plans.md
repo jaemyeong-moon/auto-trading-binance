@@ -130,7 +130,7 @@
 | 12.7 | `tests/test_binance_client.py` — mock aiohttp 으로 client 메서드 계약 테스트 | get_candles/place_order/get_balance 응답 파싱 정상 + 에러 핸들링 | 12.1 | cc:완了 |
 | 12.8 | `tests/test_strategy_agent.py` — LLM 호출 mock, 생성→검증→등록 파이프라인 | _generate_new_strategy, _validate_and_register 각각 mock 으로 pass/fail 경로 커버 | 12.1 | cc:완了 |
 | 12.9 | 커버리지 리포트 집계 — `pytest --cov=src` 실행, 주요 모듈 50%+ 목표 | engine/strategies/exchange 50%+, 커버리지 HTML 리포트 생성 | 12.2, 12.6, 12.7, 12.8 | cc:완了 |
-| 12.10 | CI 훅 또는 로컬 pre-push 스크립트 — 테스트 실패 시 push 차단 | `scripts/test_gate.sh` (또는 pre-commit hook) 동작 확인 | 12.9 | cc:TODO |
+| 12.10 | CI 훅 또는 로컬 pre-push 스크립트 — 테스트 실패 시 push 차단 | `scripts/test_gate.sh` (또는 pre-commit hook) 동작 확인 | 12.9 | cc:完了 |
 
 ## Phase 13: 리스크 관리 고도화 — 손실 방어 시스템
 
@@ -170,7 +170,7 @@
 | 15.2 | **멀티 TF 프레임워크 정비** — 현재 15m+1h 고정을 Strategy 속성으로 선언적 지정 (`TIMEFRAMES = ["5m","15m","1h"]`) | base.py Strategy에 TIMEFRAMES 속성, 엔진이 자동 조회/주입, 기존 전략 마이그레이션 | 12.2 | cc:완了 |
 | 15.3 | **오더북 불균형 피처** 계산 유틸 (`src/strategies/features/orderbook.py`) + 단위 테스트 | bid/ask 깊이 비율, 스프레드, 대규모 주문벽 탐지 함수 + 테스트 pass | 15.1 | cc:완了 |
 | 15.4 | **펀딩비 & OI 피처** — funding rate 추세 + OI 변화율 유틸 + 단위 테스트 | `src/strategies/features/derivatives.py` + 테스트 pass | 15.1 | cc:완了 |
-| 15.5 | **v13 전략 초안 구현** (`src/strategies/orderflow_v13.py`) — 멀티 TF 추세 일치 + 오더북 불균형 + 펀딩비 극단치 진입 | 전략 등록, 단위 테스트 pass, 백테스트 30일 실행 성공 | 15.2, 15.3, 15.4, 12.1 | cc:TODO |
+| 15.5 | **v13 전략 초안 구현** (`src/strategies/orderflow_v13.py`) — 멀티 TF 추세 일치 + 오더북 불균형 + 펀딩비 극단치 진입 | 전략 등록, 단위 테스트 pass, 백테스트 30일 실행 성공 | 15.2, 15.3, 15.4, 12.1 | cc:완了 |
 | 15.6 | v13 백테스트 + 파라미터 스윕 | Sharpe/PF/승률 리포트, 기존 전략 대비 상관도 < 0.5 검증 | 15.5 | cc:TODO |
 | 15.7 | v13 가상매매 배포 + 1주 모니터링 | 서버 가동 + 거래 10건+ 확인 후 실거래 전환 판단 | 15.6, 13.2 | cc:TODO |
 
@@ -184,7 +184,7 @@
 | 16.2 | **AI 생성 전략 보안 샌드박스 강화** — AST 화이트리스트 (import 제한, 파일 IO/네트워크 금지), 실행 시간 제한 | 악의적 코드 10종 샘플에 대해 검증 실패 + 정상 전략 통과 테스트 pass | 12.8 | cc:완了 |
 | 16.3 | **AI 생성 전략 백테스트 게이트** — 자동 배포 전 최소 성과 기준(승률 45%+, PF 1.1+) 충족 필수 | 기준 미달 시 자동 폐기 + 로그, 기준 통과 케이스/실패 케이스 테스트 | 16.2 | cc:완了 |
 | 16.4 | **성과 부진 판단 로직 검증** — `analyze_performance()` 의 트리거 조건(승률/PF/거래수) 실데이터로 회귀 | 실제 실거래 2주 데이터 넣었을 때 합리적 트리거 여부 리포트 | 14.1, 16.1 | cc:TODO |
-| 16.5 | **AI Agent 실거래 가동 모드** — 현재 페이퍼 모드만 → 리스크매니저 승인 후 실거래 반영 | 16.2+16.3+13.1 통과한 전략만 실거래 반영, 핫스왑 로그 DB 기록 | 16.2, 16.3, 13.1 | cc:TODO |
+| 16.5 | **AI Agent 실거래 가동 모드** — 현재 페이퍼 모드만 → 리스크매니저 승인 후 실거래 반영 | 16.2+16.3+13.1 통과한 전략만 실거래 반영, 핫스왑 로그 DB 기록 | 16.2, 16.3, 13.1 | cc:완了 |
 | 16.6 | 모바일 대시보드 — AI 에이전트 활동 로그 카드 (생성 시도/통과/폐기/스왑) | `/api/agent/activity` 엔드포인트 + UI 카드, 최근 20건 표시 | 16.5 | cc:TODO |
 | 16.7 | AI Agent 2주 실전 가동 및 효과 측정 | 생성 전략 개수 / 통과율 / 핫스왑 수익 기여 리포트 | 16.5, 16.6 | cc:TODO |
 
