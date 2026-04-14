@@ -469,11 +469,16 @@ async def test_start_symbol_uses_strategy_leverage_7(mock_futures_client):
     strategy = _HighLeverageStrategy()
     engine = FuturesEngine(mock_futures_client)
 
+    mock_futures_client.get_position.return_value = None
+
     db_patch = {
         "get_setting": MagicMock(return_value="high_leverage_stub"),
         "get_settings_hash": MagicMock(return_value="abc"),
         "set_bot_running": MagicMock(),
         "is_bot_running": MagicMock(return_value=False),
+        "load_strategy_state": MagicMock(return_value=None),
+        "get_position": MagicMock(return_value=None),
+        "delete_position": MagicMock(),
     }
 
     with patch.multiple("src.core.futures_engine.db", **db_patch), \
@@ -497,11 +502,16 @@ async def test_start_symbol_uses_default_leverage_5_when_no_attr(mock_futures_cl
 
     engine = FuturesEngine(mock_futures_client)
 
+    mock_futures_client.get_position.return_value = None
+
     db_patch = {
         "get_setting": MagicMock(return_value="no_leverage_attr_stub"),
         "get_settings_hash": MagicMock(return_value="abc"),
         "set_bot_running": MagicMock(),
         "is_bot_running": MagicMock(return_value=False),
+        "load_strategy_state": MagicMock(return_value=None),
+        "get_position": MagicMock(return_value=None),
+        "delete_position": MagicMock(),
     }
 
     with patch.multiple("src.core.futures_engine.db", **db_patch), \
@@ -521,11 +531,16 @@ async def test_start_symbol_leverage_value_passed_exactly(mock_futures_client):
     strategy = _HighLeverageStrategy()
     engine = FuturesEngine(mock_futures_client)
 
+    mock_futures_client.get_position.return_value = None
+
     db_patch = {
         "get_setting": MagicMock(return_value="high_leverage_stub"),
         "get_settings_hash": MagicMock(return_value="abc"),
         "set_bot_running": MagicMock(),
         "is_bot_running": MagicMock(return_value=False),
+        "load_strategy_state": MagicMock(return_value=None),
+        "get_position": MagicMock(return_value=None),
+        "delete_position": MagicMock(),
     }
 
     with patch.multiple("src.core.futures_engine.db", **db_patch), \
@@ -1082,3 +1097,282 @@ async def test_open_position_calls_risk_manager_position_size(mock_futures_clien
     mock_ps.assert_called_once()
     call_kwargs = mock_ps.call_args
     assert call_kwargs is not None, "position_size가 호출되지 않았습니다"
+
+
+# ── Task 17: 봇 재시작 내성 Tests ─────────────────────────────
+
+
+# ── 17.1: 전략 상태 DB 왕복 저장/로드 ──────────────────────────
+
+
+def test_save_and_load_strategy_state_roundtrip():
+    """save_strategy_state → load_strategy_state 왕복 테스트 (DB mock)."""
+    from src.core import database as database_module
+
+    state = {
+        "cooldown_remaining": 5,
+        "consecutive_losses": 3,
+        "trades_this_hour": 2,
+        "last_hour": 14,
+        "total_trades": 42,
+        "wins": 25,
+        "losses": 17,
+    }
+
+    with patch.object(database_module, "save_strategy_state") as mock_save, \
+         patch.object(database_module, "load_strategy_state", return_value=state) as mock_load:
+        database_module.save_strategy_state("pattern_scalper", state)
+        loaded = database_module.load_strategy_state("pattern_scalper")
+
+    mock_save.assert_called_once_with("pattern_scalper", state)
+    mock_load.assert_called_once_with("pattern_scalper")
+    assert loaded == state
+
+
+@pytest.mark.asyncio
+async def test_state_restored_after_restart(mock_futures_client):
+    """재시작 후 cooldown_remaining / consecutive_losses가 DB에서 복원된다."""
+    from src.core.futures_engine import FuturesEngine
+    from src.strategies.pattern_scalper import PatternScalper
+
+    strategy = PatternScalper()
+    engine = FuturesEngine(mock_futures_client)
+
+    saved_state = {
+        "cooldown_remaining": 7,
+        "consecutive_losses": 3,
+        "trades_this_hour": 0,
+        "last_hour": -1,
+        "total_trades": 10,
+        "wins": 6,
+        "losses": 4,
+    }
+
+    db_patch = {
+        "get_setting": MagicMock(return_value="pattern_scalper"),
+        "get_settings_hash": MagicMock(return_value="abc"),
+        "set_bot_running": MagicMock(),
+        "is_bot_running": MagicMock(return_value=False),
+        "load_strategy_state": MagicMock(return_value=saved_state),
+        "save_strategy_state": MagicMock(),
+        "get_position": MagicMock(return_value=None),
+        "delete_position": MagicMock(),
+    }
+
+    # 거래소 포지션 없음
+    mock_futures_client.get_position.return_value = None
+
+    with patch.multiple("src.core.futures_engine.db", **db_patch), \
+         patch("src.core.futures_engine.get_strategy", return_value=strategy):
+        await engine.start_symbol("BTCUSDT")
+        for task in list(engine._tasks.values()):
+            task.cancel()
+        if engine._paper_task:
+            engine._paper_task.cancel()
+
+    # 복원 확인
+    assert strategy.state.cooldown_remaining == 7
+    assert strategy.state.consecutive_losses == 3
+    assert strategy.state.total_trades == 10
+
+
+# ── 17.2: 재시작 시 거래소 포지션 동기화 ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_position_synced_from_exchange_on_start(mock_futures_client):
+    """재시작 시 거래소에 열린 포지션이 있으면 전략 state에 반영된다."""
+    from src.core.futures_engine import FuturesEngine
+    from src.strategies.pattern_scalper import PatternScalper
+
+    strategy = PatternScalper()
+    engine = FuturesEngine(mock_futures_client)
+
+    exchange_pos = {
+        "side": "LONG",
+        "entry_price": 85000.0,
+        "quantity": 0.01,
+    }
+    mock_futures_client.get_position.return_value = exchange_pos
+
+    db_patch = {
+        "get_setting": MagicMock(return_value="pattern_scalper"),
+        "get_settings_hash": MagicMock(return_value="abc"),
+        "set_bot_running": MagicMock(),
+        "is_bot_running": MagicMock(return_value=False),
+        "load_strategy_state": MagicMock(return_value=None),
+        "save_strategy_state": MagicMock(),
+        "get_position": MagicMock(return_value=None),   # DB에는 없음
+        "open_position": MagicMock(),
+        "delete_position": MagicMock(),
+    }
+
+    with patch.multiple("src.core.futures_engine.db", **db_patch), \
+         patch("src.core.futures_engine.get_strategy", return_value=strategy):
+        await engine.start_symbol("BTCUSDT")
+        for task in list(engine._tasks.values()):
+            task.cancel()
+        if engine._paper_task:
+            engine._paper_task.cancel()
+
+    # 전략 state에 포지션 반영됨
+    assert strategy.state.position_side == "LONG"
+    assert strategy.state.entry_price == 85000.0
+
+    # DB에도 포지션 기록됨
+    db_patch["open_position"].assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_no_exchange_position_clears_state_on_start(mock_futures_client):
+    """재시작 시 거래소에 포지션 없으면 전략 state 포지션 필드 초기화 + DB 고아 정리."""
+    from src.core.futures_engine import FuturesEngine
+    from src.strategies.pattern_scalper import PatternScalper
+
+    strategy = PatternScalper()
+    # 이전에 포지션이 있었던 것처럼 state 세팅
+    strategy.state.position_side = "SHORT"
+    strategy.state.entry_price = 70000.0
+
+    engine = FuturesEngine(mock_futures_client)
+    mock_futures_client.get_position.return_value = None  # 거래소 포지션 없음
+
+    mock_db_pos = MagicMock()
+    db_patch = {
+        "get_setting": MagicMock(return_value="pattern_scalper"),
+        "get_settings_hash": MagicMock(return_value="abc"),
+        "set_bot_running": MagicMock(),
+        "is_bot_running": MagicMock(return_value=False),
+        "load_strategy_state": MagicMock(return_value=None),
+        "save_strategy_state": MagicMock(),
+        "get_position": MagicMock(return_value=mock_db_pos),  # DB에는 있음 (고아)
+        "delete_position": MagicMock(),
+    }
+
+    with patch.multiple("src.core.futures_engine.db", **db_patch), \
+         patch("src.core.futures_engine.get_strategy", return_value=strategy):
+        await engine.start_symbol("BTCUSDT")
+        for task in list(engine._tasks.values()):
+            task.cancel()
+        if engine._paper_task:
+            engine._paper_task.cancel()
+
+    # 전략 state 포지션 초기화
+    assert strategy.state.position_side == "NONE"
+    assert strategy.state.entry_price == 0.0
+
+    # DB 고아 레코드 삭제
+    db_patch["delete_position"].assert_called_once_with("BTCUSDT")
+
+
+# ── 17.3: 재시작 쿨다운 동안 신규 진입 차단 ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_startup_cooldown_blocks_new_entry(mock_futures_client):
+    """재시작 쿨다운 > 0 이면 신규 진입을 차단한다 (포지션 없을 때)."""
+    strategy = _SignalOnlyStrategy(SignalType.BUY)
+    engine = _make_engine_with_strategy(mock_futures_client, strategy)
+
+    # 쿨다운 설정 (재시작 직후)
+    engine._startup_cooldown_ticks["BTCUSDT"] = 5
+
+    mock_futures_client.get_position.return_value = None  # 포지션 없음
+
+    db_patch = {
+        "get_setting": MagicMock(return_value=""),
+        "get_setting_float": MagicMock(return_value=0.005),
+        "get_setting_int": MagicMock(return_value=5),
+        "log_signal": MagicMock(),
+        "get_settings_hash": MagicMock(return_value="abc"),
+        "get_position": MagicMock(return_value=None),
+        "record_trail": MagicMock(),
+    }
+
+    with patch.multiple("src.core.futures_engine.db", **db_patch):
+        await engine._tick_signal_only("BTCUSDT", strategy)
+
+    # 쿨다운 중이므로 진입 없음
+    mock_futures_client.open_long.assert_not_called()
+    mock_futures_client.open_short.assert_not_called()
+    # 쿨다운 카운터가 감소됨
+    assert engine._startup_cooldown_ticks["BTCUSDT"] == 4
+
+
+@pytest.mark.asyncio
+async def test_startup_cooldown_allows_entry_after_expiry(mock_futures_client):
+    """쿨다운이 0이 되면 정상 진입한다."""
+    strategy = _SignalOnlyStrategy(SignalType.BUY)
+    engine = _make_engine_with_strategy(mock_futures_client, strategy)
+
+    # 쿨다운 0 = 이미 만료
+    engine._startup_cooldown_ticks["BTCUSDT"] = 0
+
+    mock_futures_client.get_position.return_value = None
+
+    db_patch = {
+        "get_setting": MagicMock(return_value=""),
+        "get_setting_float": MagicMock(return_value=0.005),
+        "get_setting_int": MagicMock(return_value=5),
+        "log_signal": MagicMock(),
+        "open_position": MagicMock(),
+        "get_open_positions": MagicMock(return_value=[]),
+        "get_today_pnl": MagicMock(return_value=(0.0, 0)),
+        "get_settings_hash": MagicMock(return_value="abc"),
+    }
+
+    with patch.multiple("src.core.futures_engine.db", **db_patch):
+        await engine._tick_signal_only("BTCUSDT", strategy)
+
+    mock_futures_client.open_long.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_startup_cooldown_does_not_block_position_management(mock_futures_client):
+    """쿨다운 중에도 기존 포지션의 SL/TP 관리는 정상 동작한다."""
+    strategy = _SignalOnlyStrategy(SignalType.HOLD)
+    # FULL_TP_PCT 초과 → 청산이 먼저 발생
+    strategy.FULL_TP_PCT = 0.001  # 0.1% — 테스트에서 쉽게 도달
+    engine = _make_engine_with_strategy(mock_futures_client, strategy)
+
+    # 쿨다운 설정
+    engine._startup_cooldown_ticks["BTCUSDT"] = 10
+
+    # 포지션 있음, 가격이 TP 근처
+    pos = {"side": "LONG", "entry_price": 100.0, "quantity": 0.01}
+    mock_futures_client.get_position.side_effect = [
+        pos,     # _tick_signal_only 첫 조회 (포지션 체크)
+        pos,     # _close_current 내부 조회
+    ]
+
+    db_patch = {
+        "get_setting": MagicMock(return_value=""),
+        "get_setting_float": MagicMock(return_value=0.005),
+        "get_setting_int": MagicMock(return_value=5),
+        "log_signal": MagicMock(),
+        "close_position": MagicMock(return_value=None),
+        "delete_position": MagicMock(),
+        "record_trail": MagicMock(),
+        "get_position": MagicMock(return_value=None),
+        "link_trails_to_trade": MagicMock(),
+        "get_settings_hash": MagicMock(return_value="abc"),
+    }
+
+    # 가격을 TP 초과로 설정 (entry 100 → price 102 = +2% > FULL_TP_PCT 0.1%)
+    import pandas as pd
+    import numpy as np
+    close_prices = np.array([100.0] * 20 + [102.0])
+    candles = pd.DataFrame({
+        "open": close_prices,
+        "high": close_prices * 1.001,
+        "low": close_prices * 0.999,
+        "close": close_prices,
+        "volume": np.ones(len(close_prices)) * 1000,
+    })
+    mock_futures_client.get_candles.return_value = candles
+
+    with patch.multiple("src.core.futures_engine.db", **db_patch):
+        await engine._tick_signal_only("BTCUSDT", strategy)
+
+    # 청산은 쿨다운과 무관하게 실행됨
+    mock_futures_client.close_long.assert_called_once()

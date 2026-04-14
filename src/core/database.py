@@ -185,6 +185,16 @@ class AgentSwapLog(Base):
     profit_factor = Column(Float, nullable=True)
 
 
+class StrategyState(Base):
+    """전략 내부 상태 영속화 — 재시작 시 복원에 사용."""
+    __tablename__ = "strategy_states"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    strategy_name = Column(String, nullable=False, unique=True)
+    state_json = Column(String, nullable=False)   # JSON 직렬화
+    updated_at = Column(DateTime, default=now_kst)
+
+
 def _set_sqlite_pragmas(dbapi_conn, _connection_record):
     """SQLite WAL 모드 + busy_timeout 설정 — 다중 프로세스 접근 시 잠금 방지."""
     cursor = dbapi_conn.cursor()
@@ -352,6 +362,38 @@ def log_agent_swap(
             profit_factor=profit_factor,
         ))
         session.commit()
+
+
+# ─── Strategy State helpers ───────────────────────────────
+
+def save_strategy_state(strategy_name: str, state_dict: dict) -> None:
+    """전략 상태를 DB에 저장 (upsert). 직렬화 불가 값은 건너뜀."""
+    state_json = json.dumps(state_dict, default=str)
+    with get_session() as session:
+        row = session.query(StrategyState).filter_by(strategy_name=strategy_name).first()
+        if row:
+            row.state_json = state_json
+            row.updated_at = now_kst()
+        else:
+            row = StrategyState(
+                strategy_name=strategy_name,
+                state_json=state_json,
+                updated_at=now_kst(),
+            )
+            session.add(row)
+        session.commit()
+
+
+def load_strategy_state(strategy_name: str) -> dict | None:
+    """DB에서 전략 상태를 로드. 없으면 None."""
+    with get_session() as session:
+        row = session.query(StrategyState).filter_by(strategy_name=strategy_name).first()
+        if not row:
+            return None
+        try:
+            return json.loads(row.state_json)
+        except (json.JSONDecodeError, TypeError):
+            return None
 
 
 # ─── Risk status helper ────────────────────────────────────

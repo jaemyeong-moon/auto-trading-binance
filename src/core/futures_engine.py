@@ -21,6 +21,23 @@ logger = structlog.get_logger()
 # AI Agent 실행 주기 (틱 수 기준, 기본 tick=30초 × 120 = 약 1시간)
 AI_AGENT_INTERVAL_TICKS = 120
 
+# 재시작 쿨다운: 최초 N틱 동안 신규 진입 억제 (기본 tick=15초 × 10 = 150초 ≈ 2.5분)
+STARTUP_COOLDOWN_TICKS = 10
+
+# 전략 상태 저장 주기 (N틱마다 — 성능 고려)
+STATE_SAVE_INTERVAL_TICKS = 5
+
+# 전략 state → dict 직렬화 대상 필드 (포지션 관련 필드 제외: Task 17.2에서 거래소 동기화)
+_STATE_PERSIST_FIELDS = (
+    "cooldown_remaining",
+    "consecutive_losses",
+    "trades_this_hour",
+    "last_hour",
+    "total_trades",
+    "wins",
+    "losses",
+)
+
 
 class FuturesEngine:
     """선물 거래 엔진. 전략의 mode에 따라 실행 방식이 달라짐."""
@@ -46,6 +63,7 @@ class FuturesEngine:
         self._settings_hash = db.get_settings_hash()
         self._current_strategy_name: dict[str, str] = {}
         self._restart_status: dict[str, str] = {}  # symbol -> "restarting" | ""
+        self._startup_cooldown_ticks: dict[str, int] = {}  # symbol -> 남은 쿨다운 틱 수
 
     async def start_symbol(self, symbol: str) -> None:
         if symbol in self._tasks and not self._tasks[symbol].done():
@@ -58,6 +76,36 @@ class FuturesEngine:
 
         leverage = getattr(strategy, "LEVERAGE", 5)
         await self.client.set_leverage(symbol, leverage)
+
+        # ── Task 17.1: 전략 상태 복원 ──────────────────────────
+        saved_state = db.load_strategy_state(strategy.name)
+        if saved_state:
+            state = getattr(strategy, "state", None)
+            if state is not None:
+                for field in _STATE_PERSIST_FIELDS:
+                    if field in saved_state:
+                        try:
+                            setattr(state, field, saved_state[field])
+                        except (AttributeError, TypeError):
+                            pass
+                logger.info(
+                    "engine.state_restored",
+                    symbol=symbol,
+                    strategy=strategy.name,
+                    cooldown=saved_state.get("cooldown_remaining", 0),
+                    consecutive_losses=saved_state.get("consecutive_losses", 0),
+                )
+
+        # ── Task 17.2: 거래소 포지션 동기화 ────────────────────
+        await self._sync_position_on_start(symbol, strategy)
+
+        # ── Task 17.3: 재시작 쿨다운 설정 ──────────────────────
+        self._startup_cooldown_ticks[symbol] = STARTUP_COOLDOWN_TICKS
+        logger.info(
+            "engine.startup_cooldown_set",
+            symbol=symbol,
+            cooldown_ticks=STARTUP_COOLDOWN_TICKS,
+        )
 
         db.set_bot_running(symbol, True)
         task = asyncio.create_task(self._symbol_loop(symbol))
@@ -118,6 +166,10 @@ class FuturesEngine:
                     await self._tick_always_flip(symbol, strategy)
                 else:
                     await self._tick_signal_only(symbol, strategy)
+
+                # ── Task 17.1: 5틱마다 전략 상태 저장 ──
+                if tick_count % STATE_SAVE_INTERVAL_TICKS == 0:
+                    self._save_strategy_state(strategy)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -321,6 +373,87 @@ class FuturesEngine:
         except Exception:
             pass  # 로깅 실패가 거래에 영향 주면 안 됨
 
+    def _save_strategy_state(self, strategy: Strategy) -> None:
+        """전략의 persist 대상 필드를 DB에 저장."""
+        state = getattr(strategy, "state", None)
+        if state is None:
+            return
+        state_dict = {}
+        for field in _STATE_PERSIST_FIELDS:
+            val = getattr(state, field, None)
+            if val is not None:
+                state_dict[field] = val
+        try:
+            db.save_strategy_state(strategy.name, state_dict)
+        except Exception:
+            logger.debug("engine.state_save_failed", strategy=strategy.name)
+
+    async def _sync_position_on_start(self, symbol: str, strategy: Strategy) -> None:
+        """재시작 시 거래소 포지션과 전략 state를 동기화."""
+        try:
+            exchange_pos = await self.client.get_position(symbol)
+            state = getattr(strategy, "state", None)
+
+            if exchange_pos:
+                # 거래소에 열린 포지션 있음 → 전략 state에 반영
+                if state is not None:
+                    if hasattr(state, "position_side"):
+                        state.position_side = exchange_pos.get("side", "NONE")
+                    if hasattr(state, "entry_price"):
+                        state.entry_price = exchange_pos.get("entry_price", 0.0)
+                    if hasattr(state, "ticks_in_position"):
+                        state.ticks_in_position = 0  # 틱 수는 알 수 없으므로 초기화
+                    if hasattr(state, "highest_since_entry"):
+                        state.highest_since_entry = exchange_pos.get("entry_price", 0.0)
+                    if hasattr(state, "lowest_since_entry"):
+                        state.lowest_since_entry = exchange_pos.get("entry_price", float("inf"))
+
+                # DB PositionRecord와 동기화 — 없으면 생성
+                db_pos = db.get_position(symbol)
+                if not db_pos:
+                    db.open_position(
+                        symbol=symbol,
+                        side=exchange_pos.get("side", "LONG"),
+                        entry_price=exchange_pos.get("entry_price", 0.0),
+                        quantity=exchange_pos.get("quantity", 0.0),
+                        strategy=strategy.name,
+                    )
+                    logger.info(
+                        "engine.position_synced",
+                        symbol=symbol,
+                        side=exchange_pos.get("side"),
+                        entry_price=exchange_pos.get("entry_price"),
+                    )
+                else:
+                    logger.info(
+                        "engine.position_already_in_db",
+                        symbol=symbol,
+                        side=db_pos.side,
+                    )
+            else:
+                # 거래소에 포지션 없음 → 전략 state 포지션 초기화
+                if state is not None:
+                    if hasattr(state, "position_side"):
+                        state.position_side = "NONE"
+                    if hasattr(state, "entry_price"):
+                        state.entry_price = 0.0
+                    if hasattr(state, "sl_price"):
+                        state.sl_price = 0.0
+                    if hasattr(state, "tp_price"):
+                        state.tp_price = 0.0
+
+                # DB 고아 레코드 정리
+                db_pos = db.get_position(symbol)
+                if db_pos:
+                    db.delete_position(symbol)
+                    logger.info(
+                        "engine.orphan_position_cleaned",
+                        symbol=symbol,
+                    )
+
+        except Exception:
+            logger.exception("engine.position_sync_failed", symbol=symbol)
+
     def get_restart_status(self) -> dict[str, str]:
         """각 심볼의 재시작 상태 반환."""
         return dict(self._restart_status)
@@ -435,11 +568,22 @@ class FuturesEngine:
         if pos:
             self._record_trail(symbol, pos, price)
 
-        # ── 포지션 있을 때: 익절/손절/트레일링 관리 ──
+        # ── 포지션 있을 때: 익절/손절/트레일링 관리 (쿨다운 무관하게 실행) ──
         if pos:
             closed = await self._manage_exit_v2(symbol, strategy, pos, price, candles)
             if closed:
                 return
+
+        # ── Task 17.3: 재시작 쿨다운 — 신규 진입만 억제, 포지션 관리는 위에서 이미 처리 ──
+        if self._startup_cooldown_ticks.get(symbol, 0) > 0:
+            self._startup_cooldown_ticks[symbol] -= 1
+            remaining = self._startup_cooldown_ticks[symbol]
+            logger.info(
+                "engine.startup_cooldown",
+                symbol=symbol,
+                remaining_ticks=remaining,
+            )
+            return
 
         # ── 전략 평가 (1분봉 + 15분봉) ──
         signal = strategy.evaluate(symbol, candles, htf)
