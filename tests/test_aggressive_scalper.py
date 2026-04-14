@@ -1,14 +1,14 @@
-"""Tests for v4 AggressiveMomentumRider."""
+"""Tests for v9 AggressiveMomentumRider (Trend Pullback)."""
 
 import numpy as np
 import pandas as pd
 import pytest
+from unittest.mock import patch
 
 from src.core.models import SignalType
 from src.strategies.aggressive_scalper import (
-    AggressiveMomentumRider, AggressiveState, MicroRegime,
-    detect_momentum_burst, detect_big_candle, detect_squeeze,
-    compute_micro_regime,
+    AggressiveMomentumRider, V9State,
+    COOLDOWN_WIN, COOLDOWN_LOSS, MAX_DAILY_TRADES,
 )
 
 
@@ -25,20 +25,16 @@ def _make_candles(prices, volumes=None):
     }, index=pd.date_range("2024-01-01", periods=n, freq="min"))
 
 
-def _pump(n=100):
-    """급등 시뮬레이션."""
+def _trending_up_htf(n=220):
+    """15m 상승 추세: EMA50 > EMA200."""
     np.random.seed(42)
-    base = list(100 + np.random.randn(80) * 0.1)
-    spike = list(100 + np.arange(20) * 1.0)  # 급등
-    return base + spike
+    return list(100 + np.arange(n) * 0.5 + np.random.randn(n) * 0.1)
 
 
-def _dump(n=100):
-    """급락 시뮬레이션."""
+def _trending_down_htf(n=220):
+    """15m 하락 추세: EMA50 < EMA200."""
     np.random.seed(42)
-    base = list(100 + np.random.randn(80) * 0.1)
-    spike = list(100 - np.arange(20) * 1.0)
-    return base + spike
+    return list(200 - np.arange(n) * 0.5 + np.random.randn(n) * 0.1)
 
 
 def _flat(n=100):
@@ -46,106 +42,188 @@ def _flat(n=100):
     return list(100 + np.random.randn(n) * 0.01)
 
 
-class TestAggressiveState:
-    def test_flip_mode_on_2_losses(self):
-        s = AggressiveMomentumRider()
-        s.record_result(-1.0)  # 1st loss
-        assert not s.state.flip_mode
-        s.record_result(-1.0)  # 2nd loss → flip
-        assert s.state.flip_mode
+# ── V9State 단위 테스트 ──
 
-    def test_flip_mode_toggles(self):
-        s = AggressiveMomentumRider()
-        s.record_result(-1.0)
-        s.record_result(-1.0)  # flip ON
-        assert s.state.flip_mode
-        s.record_result(-1.0)
-        s.record_result(-1.0)  # flip OFF (toggle)
-        assert not s.state.flip_mode
 
-    def test_win_resets(self):
-        s = AggressiveMomentumRider()
-        s.record_result(-1.0)
-        s.record_result(-1.0)
-        assert s.state.flip_mode
-        s.record_result(5.0)  # win → reset
-        assert not s.state.flip_mode
-        assert s.state.consecutive_losses == 0
+class TestV9State:
+    def test_open_and_close(self):
+        state = V9State()
+        state.open("LONG", 100.0, 98.0, 104.0, 1.0, 0.02, 1.5)
+        assert state.position_side == "LONG"
+        assert state.entry_price == 100.0
+        assert state.sl_price == 98.0
+        assert state.tp_price == 104.0
+        assert state.entry_atr == 1.5
+        state.close()
+        assert state.position_side == "NONE"
+        assert state.entry_price == 0.0
 
-    def test_no_cooldown(self):
-        """v4는 쿨다운이 없다."""
+    def test_update_price(self):
+        state = V9State()
+        state.open("LONG", 100.0, 98.0, 104.0, 1.0, 0.02, 1.5)
+        state.update_price(105.0)
+        assert state.highest_since_entry == 105.0
+        state.update_price(95.0)
+        assert state.lowest_since_entry == 95.0
+
+    def test_daily_trade_tracking(self):
+        state = V9State()
+        state.daily_trades = MAX_DAILY_TRADES
+        assert state.daily_trades >= MAX_DAILY_TRADES
+
+
+# ── record_result 테스트 ──
+
+
+class TestRecordResult:
+    def test_loss_triggers_cooldown(self):
         s = AggressiveMomentumRider()
         s.record_result(-1.0)
-        candles = _make_candles(_pump(), volumes=[10000.0] * 100)
+        assert s.state.cooldown_remaining == COOLDOWN_LOSS
+        assert s.state.losses == 1
+
+    def test_win_triggers_short_cooldown(self):
+        s = AggressiveMomentumRider()
+        s.record_result(5.0)
+        assert s.state.cooldown_remaining == COOLDOWN_WIN
+        assert s.state.wins == 1
+
+    def test_trade_count_increments(self):
+        s = AggressiveMomentumRider()
+        s.record_result(-1.0)
+        s.record_result(5.0)
+        assert s.state.total_trades == 2
+        assert s.state.daily_trades == 2
+
+
+# ── evaluate 기본 경로 테스트 ──
+
+
+class TestEvaluateBasicPaths:
+    @patch("src.core.time_filter.is_tradeable_hour", return_value=True)
+    def test_no_htf_returns_hold(self, _mock_hour):
+        s = AggressiveMomentumRider()
+        candles = _make_candles(_flat())
+        signal = s.evaluate("BTCUSDT", candles, htf_candles=None)
+        assert signal.type == SignalType.HOLD
+        assert signal.metadata["reason"] == "insufficient_htf"
+
+    @patch("src.core.time_filter.is_tradeable_hour", return_value=True)
+    def test_short_htf_returns_hold(self, _mock_hour):
+        s = AggressiveMomentumRider()
+        candles = _make_candles(_flat())
+        htf = _make_candles([100.0] * 50)
+        signal = s.evaluate("BTCUSDT", candles, htf_candles=htf)
+        assert signal.type == SignalType.HOLD
+        assert signal.metadata["reason"] == "insufficient_htf"
+
+    @patch("src.core.time_filter.is_tradeable_hour", return_value=False)
+    def test_blocked_hour(self, _mock_hour):
+        s = AggressiveMomentumRider()
+        candles = _make_candles(_flat())
         signal = s.evaluate("BTCUSDT", candles)
-        # 쿨다운 없으므로 HOLD reason이 cooldown이 아님
-        if signal.type == SignalType.HOLD:
-            assert signal.metadata.get("reason") != "cooldown"
+        assert signal.type == SignalType.HOLD
+        assert signal.metadata["reason"] == "blocked_hour"
 
-
-class TestMomentumBurst:
-    def test_pump_detected(self):
-        candles = _make_candles(_pump())
-        atr = 0.5  # 작은 ATR 대비 큰 움직임
-        direction, strength = detect_momentum_burst(candles, atr)
-        assert direction == "LONG"
-        assert strength > 0.8
-
-    def test_dump_detected(self):
-        candles = _make_candles(_dump())
-        direction, strength = detect_momentum_burst(candles, atr=0.5)
-        assert direction == "SHORT"
-
-    def test_flat_no_burst(self):
+    @patch("src.core.time_filter.is_tradeable_hour", return_value=True)
+    def test_cooldown_returns_hold(self, _mock_hour):
+        s = AggressiveMomentumRider()
+        s.state.cooldown_remaining = 3
         candles = _make_candles(_flat())
-        direction, _ = detect_momentum_burst(candles, atr=1.0)
-        assert direction == "NONE"
+        htf = _make_candles(_trending_up_htf())
+        signal = s.evaluate("BTCUSDT", candles, htf_candles=htf)
+        assert signal.type == SignalType.HOLD
+        assert signal.metadata["reason"] == "cooldown"
+        assert s.state.cooldown_remaining == 2  # decremented
+
+    @patch("src.core.time_filter.is_tradeable_hour", return_value=True)
+    def test_daily_limit_returns_hold(self, _mock_hour):
+        s = AggressiveMomentumRider()
+        s.state.daily_trades = MAX_DAILY_TRADES
+        from datetime import datetime
+        s.state.last_trade_day = datetime.now().day
+        candles = _make_candles(_flat())
+        htf = _make_candles(_trending_up_htf())
+        signal = s.evaluate("BTCUSDT", candles, htf_candles=htf)
+        assert signal.type == SignalType.HOLD
+        assert signal.metadata["reason"] == "daily_limit"
 
 
-class TestBigCandle:
-    def test_big_green_candle(self):
-        prices = [100.0] * 99 + [105.0]  # 마지막 캔들 큰 양봉
+# ── _manage_position 테스트 ──
+
+
+class TestManagePosition:
+    def test_stop_loss_long(self):
+        s = AggressiveMomentumRider()
+        s.state.open("LONG", 100.0, 97.0, 106.0, 1.0, 0.01, 1.5)
+        prices = [97.0] * 20  # price at SL level
         candles = _make_candles(prices)
-        direction, ratio = detect_big_candle(candles)
-        assert direction == "LONG"
+        signal = s._manage_position("BTCUSDT", 97.0, candles)
+        assert signal.type == SignalType.CLOSE
+        assert signal.metadata["reason"] == "stop_loss"
 
-    def test_small_candle(self):
-        candles = _make_candles(_flat())
-        direction, _ = detect_big_candle(candles)
-        # 평평한 데이터에서는 대형 캔들 없음
-        # (open과 close가 거의 같음)
+    def test_stop_loss_short(self):
+        s = AggressiveMomentumRider()
+        s.state.open("SHORT", 100.0, 103.0, 94.0, 1.0, 0.01, 1.5)
+        prices = [103.0] * 20
+        candles = _make_candles(prices)
+        signal = s._manage_position("BTCUSDT", 103.0, candles)
+        assert signal.type == SignalType.CLOSE
+        assert signal.metadata["reason"] == "stop_loss"
+
+    def test_hold_within_range(self):
+        s = AggressiveMomentumRider()
+        s.state.open("LONG", 100.0, 97.0, 106.0, 1.0, 0.01, 1.5)
+        prices = [101.0] * 20  # within SL/TP range
+        candles = _make_candles(prices)
+        signal = s._manage_position("BTCUSDT", 101.0, candles)
+        assert signal.type in (SignalType.HOLD, SignalType.CLOSE)
 
 
-class TestStrategy:
+# ── _check_momentum 테스트 ──
+
+
+class TestCheckMomentum:
+    def test_rising_momentum_long(self):
+        s = AggressiveMomentumRider()
+        prices = list(np.linspace(100, 110, 20))
+        candles = _make_candles(prices)
+        m = s._check_momentum("LONG", candles)
+        assert m > 0
+
+    def test_falling_momentum_short(self):
+        s = AggressiveMomentumRider()
+        prices = list(np.linspace(110, 100, 20))
+        candles = _make_candles(prices)
+        m = s._check_momentum("SHORT", candles)
+        assert m > 0  # negative change but SHORT → positive
+
+    def test_insufficient_data(self):
+        s = AggressiveMomentumRider()
+        candles = _make_candles([100.0] * 5)
+        m = s._check_momentum("LONG", candles)
+        assert m == 0.0
+
+
+# ── Strategy 메타데이터 ──
+
+
+class TestStrategyMeta:
     def test_name(self):
         s = AggressiveMomentumRider()
         assert s.name == "aggressive_momentum_rider"
         assert s.mode.value == "signal_only"
 
-    def test_pump_gives_buy(self):
+    def test_constants(self):
         s = AggressiveMomentumRider()
-        candles = _make_candles(_pump(), volumes=[10000.0] * 100)
-        signal = s.evaluate("BTCUSDT", candles)
-        assert signal.type in (SignalType.BUY, SignalType.HOLD)
-
-    def test_dump_gives_sell(self):
-        s = AggressiveMomentumRider()
-        candles = _make_candles(_dump(), volumes=[10000.0] * 100)
-        signal = s.evaluate("BTCUSDT", candles)
-        assert signal.type in (SignalType.SELL, SignalType.HOLD)
-
-    def test_tight_sl_tp(self):
-        s = AggressiveMomentumRider()
-        assert s.SL_ATR_MULT == 0.5
-        assert s.TP_ATR_MULT == 0.75
-        assert s.SL_ATR_MULT < s.TP_ATR_MULT  # TP > SL
-
-    def test_low_threshold(self):
-        s = AggressiveMomentumRider()
-        assert s.SCORE_THRESHOLD == 2  # 낮은 진입장벽
+        assert s.LEVERAGE == 5
+        assert s.MAX_HOLD_HOURS == 6.0
+        # Self-managed SL/TP: engine SL/TP disabled
+        assert s.SL_ATR_MULT == 99.0
+        assert s.TP_ATR_MULT == 99.0
 
 
-class TestRegistryV4:
+class TestRegistryV9:
     def test_registered(self):
         from src.strategies.registry import list_strategies
         names = [s["name"] for s in list_strategies()]
