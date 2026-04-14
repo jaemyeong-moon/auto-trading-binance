@@ -137,6 +137,43 @@ class RiskManager:
         result = kelly_pct * safety_factor
         return min(result, max_pct)
 
+    def check_correlation(
+        self,
+        symbol: str,
+        open_symbols: list[str],
+        correlation_matrix: dict[tuple[str, str], float],
+        threshold: float = 0.8,
+    ) -> tuple[bool, str]:
+        """Check whether *symbol* is highly correlated with any open position.
+
+        Args:
+            symbol: The symbol being considered for entry.
+            open_symbols: List of symbols that already have open positions.
+            correlation_matrix: Mapping of ``(sym_a, sym_b) -> correlation``.
+                Both ``(A, B)`` and ``(B, A)`` orderings are normalised
+                internally, so you only need to supply one direction.
+            threshold: Correlation value above which entry is blocked
+                (exclusive; default 0.8).
+
+        Returns:
+            ``(True, "")`` when the symbol may be traded, or
+            ``(False, "correlated_with_{sym}")`` when a correlation above
+            the threshold is found.  Same-symbol is always blocked.
+        """
+        for sym in open_symbols:
+            if sym == symbol:
+                return False, f"correlated_with_{sym}"
+
+            # Normalise key ordering so both (A,B) and (B,A) work
+            corr = correlation_matrix.get((symbol, sym))
+            if corr is None:
+                corr = correlation_matrix.get((sym, symbol))
+
+            if corr is not None and corr > threshold:
+                return False, f"correlated_with_{sym}"
+
+        return True, ""
+
     def daily_dd_ok(self, daily_pnl_pct: float) -> bool:
         """Return True if today's loss has not exceeded the daily limit.
 

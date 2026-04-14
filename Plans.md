@@ -141,8 +141,8 @@
 | 13.1 | `src/core/risk_manager.py` 신설 + 단위 테스트 먼저 (`tests/test_risk_manager.py`) — 포지션 사이징/동시포지션/DD 차단 인터페이스 | 테스트 pass, RiskManager 클래스 API 확정 (can_open, position_size, daily_dd_ok) | 12.1 | cc:완了 |
 | 13.2 | **max_open_positions 실제 적용** — 엔진이 현재 포지션 수 확인 후 진입 차단 | TradingConfig.max_open_positions=3 초과 시 로그 + 거부, 테스트로 검증 | 13.1 | cc:완了 |
 | 13.3 | **일일 최대 DD 자동 차단** — 일일 손실이 `max_daily_loss_pct`(신규 설정) 초과 시 당일 신규 진입 정지 | DB에서 당일 손익 집계 → 한도 초과 시 RiskManager.can_open=False, 테스트 pass | 13.1 | cc:완了 |
-| 13.4 | **변동성(ATR) 기반 동적 포지션 사이징** — 고ATR 구간에서 사이즈 축소 | 기존 POSITION_SIZE_PCT에 ATR 계수 곱, 백테스트에서 최대 드로다운 감소 검증 | 13.1 | cc:TODO |
-| 13.5 | **심볼 간 상관도 필터** — 최근 30일 수익률 상관계수 > 0.8 쌍은 동시 포지션 차단 | `scripts/correlation.py` 산출 + RiskManager에 반영, 테스트 pass | 13.1 | cc:TODO |
+| 13.4 | **변동성(ATR) 기반 동적 포지션 사이징** — 고ATR 구간에서 사이즈 축소 | 기존 POSITION_SIZE_PCT에 ATR 계수 곱, 백테스트에서 최대 드로다운 감소 검증 | 13.1 | cc:완了 |
+| 13.5 | **심볼 간 상관도 필터** — 최근 30일 수익률 상관계수 > 0.8 쌍은 동시 포지션 차단 | `scripts/correlation.py` 산출 + RiskManager에 반영, 테스트 pass | 13.1 | cc:완了 |
 | 13.6 | **Kelly Criterion 기반 사이즈 제안** (선택 적용) — 전략별 승률/손익비로 최적 비율 계산, 상한 POSITION_SIZE_PCT | 전략별 Kelly 계산 로직 + 안전계수 0.25 적용, 단위 테스트 | 13.1, 7.2 | cc:완了 |
 | 13.7 | 모바일 대시보드에 리스크 상태 카드 — 당일 DD / 동시 포지션 / Kelly 추천 사이즈 표시 | 홈탭에 카드 추가, API 엔드포인트 `/api/risk/status` 추가 | 13.2, 13.3, 13.6 | cc:TODO |
 | 13.8 | 1주일 실거래에서 리스크 방어 작동 로그 수집 및 분석 | 차단 이벤트 집계 + 차단이 없었다면 발생했을 손실 추정 리포트 | 13.2, 13.3, 13.5 | cc:TODO |
@@ -181,7 +181,7 @@
 | Task | 내용 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
 | 16.1 | GeminiProvider 완성 + LLM provider 간 인터페이스 통합 테스트 | 3개 provider 모두 동일 chat_messages() 계약 pass, `tests/test_llm_provider.py` | 12.8 | cc:완了 |
-| 16.2 | **AI 생성 전략 보안 샌드박스 강화** — AST 화이트리스트 (import 제한, 파일 IO/네트워크 금지), 실행 시간 제한 | 악의적 코드 10종 샘플에 대해 검증 실패 + 정상 전략 통과 테스트 pass | 12.8 | cc:TODO |
+| 16.2 | **AI 생성 전략 보안 샌드박스 강화** — AST 화이트리스트 (import 제한, 파일 IO/네트워크 금지), 실행 시간 제한 | 악의적 코드 10종 샘플에 대해 검증 실패 + 정상 전략 통과 테스트 pass | 12.8 | cc:완了 |
 | 16.3 | **AI 생성 전략 백테스트 게이트** — 자동 배포 전 최소 성과 기준(승률 45%+, PF 1.1+) 충족 필수 | 기준 미달 시 자동 폐기 + 로그, 기준 통과 케이스/실패 케이스 테스트 | 16.2 | cc:TODO |
 | 16.4 | **성과 부진 판단 로직 검증** — `analyze_performance()` 의 트리거 조건(승률/PF/거래수) 실데이터로 회귀 | 실제 실거래 2주 데이터 넣었을 때 합리적 트리거 여부 리포트 | 14.1, 16.1 | cc:TODO |
 | 16.5 | **AI Agent 실거래 가동 모드** — 현재 페이퍼 모드만 → 리스크매니저 승인 후 실거래 반영 | 16.2+16.3+13.1 통과한 전략만 실거래 반영, 핫스왑 로그 DB 기록 | 16.2, 16.3, 13.1 | cc:TODO |

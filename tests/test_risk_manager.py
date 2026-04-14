@@ -292,3 +292,82 @@ class TestKellySize:
         """어떤 입력에도 결과는 0 이상이어야 한다."""
         result = rm.kelly_size(win_rate=0.10, avg_win=0.001, avg_loss=0.50)
         assert result >= 0.0
+
+
+# ── check_correlation ──────────────────────────────────────────────────────────
+
+
+class TestCheckCorrelation:
+    """Task 13.5 — 심볼 간 상관도 필터 테스트."""
+
+    def test_high_correlation_blocked(self, rm):
+        """상관도 0.9 > threshold(0.8) → 진입 차단."""
+        matrix = {("BTCUSDT", "ETHUSDT"): 0.9}
+        allowed, reason = rm.check_correlation(
+            "BTCUSDT", ["ETHUSDT"], matrix, threshold=0.8
+        )
+        assert allowed is False
+        assert reason == "correlated_with_ETHUSDT"
+
+    def test_low_correlation_allowed(self, rm):
+        """상관도 0.5 <= threshold(0.8) → 진입 허용."""
+        matrix = {("BTCUSDT", "SOLUSDT"): 0.5}
+        allowed, reason = rm.check_correlation(
+            "BTCUSDT", ["SOLUSDT"], matrix, threshold=0.8
+        )
+        assert allowed is True
+        assert reason == ""
+
+    def test_empty_open_positions_allowed(self, rm):
+        """열린 포지션 없음 → 항상 허용."""
+        allowed, reason = rm.check_correlation("BTCUSDT", [], {}, threshold=0.8)
+        assert allowed is True
+        assert reason == ""
+
+    def test_same_symbol_blocked(self, rm):
+        """같은 심볼이 이미 열려 있으면 상관도 무관하게 차단."""
+        matrix: dict[tuple[str, str], float] = {}
+        allowed, reason = rm.check_correlation(
+            "BTCUSDT", ["BTCUSDT"], matrix, threshold=0.8
+        )
+        assert allowed is False
+        assert reason == "correlated_with_BTCUSDT"
+
+    def test_reverse_key_order_normalised(self, rm):
+        """(B,A) 순서로 저장된 상관계수도 (A,B) 조회에서 정상 작동."""
+        # 키를 역순으로 저장
+        matrix = {("ETHUSDT", "BTCUSDT"): 0.95}
+        allowed, reason = rm.check_correlation(
+            "BTCUSDT", ["ETHUSDT"], matrix, threshold=0.8
+        )
+        assert allowed is False
+        assert reason == "correlated_with_ETHUSDT"
+
+    def test_threshold_at_exact_value_allowed(self, rm):
+        """상관도 == threshold → 차단하지 않음 (strictly greater than)."""
+        matrix = {("BTCUSDT", "ETHUSDT"): 0.8}
+        allowed, reason = rm.check_correlation(
+            "BTCUSDT", ["ETHUSDT"], matrix, threshold=0.8
+        )
+        assert allowed is True
+
+    def test_multiple_open_symbols_one_correlated(self, rm):
+        """여러 심볼 중 하나만 상관도 높아도 차단."""
+        matrix = {
+            ("BTCUSDT", "SOLUSDT"): 0.3,
+            ("BTCUSDT", "ETHUSDT"): 0.92,
+        }
+        allowed, reason = rm.check_correlation(
+            "BTCUSDT", ["SOLUSDT", "ETHUSDT"], matrix, threshold=0.8
+        )
+        assert allowed is False
+        assert "ETHUSDT" in reason
+
+    def test_missing_entry_in_matrix_treated_as_no_correlation(self, rm):
+        """상관행렬에 항목 없음 → 상관도 없다고 보고 허용."""
+        matrix: dict[tuple[str, str], float] = {}
+        allowed, reason = rm.check_correlation(
+            "BTCUSDT", ["BNBUSDT"], matrix, threshold=0.8
+        )
+        assert allowed is True
+        assert reason == ""

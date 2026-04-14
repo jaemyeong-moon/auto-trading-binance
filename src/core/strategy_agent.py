@@ -381,21 +381,65 @@ def _validate_strategy_structure(code: str) -> tuple[bool, str]:
 
 
 def _validate_no_dangerous_code(code: str) -> tuple[bool, str]:
-    """위험한 코드 패턴 검출."""
-    dangerous = [
-        ("import os", "os module not allowed"),
-        ("import subprocess", "subprocess not allowed"),
-        ("import socket", "socket not allowed"),
-        ("open(", "file I/O not allowed"),
-        ("exec(", "exec not allowed"),
-        ("eval(", "eval not allowed"),
-        ("__import__", "__import__ not allowed"),
-        ("import requests", "requests not allowed"),
-        ("import httpx", "httpx not allowed"),
-    ]
-    for pattern, msg in dangerous:
-        if pattern in code:
-            return False, msg
+    """AST 기반 위험 코드 검출.
+
+    허용 최상위 모듈 화이트리스트와 금지 함수 호출 블랙리스트를 AST 순회로 검사한다.
+    문자열 패턴 매칭 대신 AST를 사용하므로 우회(obfuscation)를 방지한다.
+    """
+    ALLOWED_TOP_MODULES = {
+        "numpy", "pandas", "ta", "src", "np", "pd", "math", "dataclasses",
+    }
+    FORBIDDEN_CALLS = {
+        "exec", "eval", "compile", "__import__", "open",
+    }
+
+    class _DangerVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.error: str = ""
+
+        def _top_module(self, name: str) -> str:
+            """'a.b.c' → 'a'"""
+            return name.split(".")[0]
+
+        def visit_Import(self, node: ast.Import) -> None:
+            for alias in node.names:
+                top = self._top_module(alias.name)
+                if top not in ALLOWED_TOP_MODULES:
+                    self.error = f"import '{alias.name}' not allowed (module: {top})"
+                    return
+            self.generic_visit(node)
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            module = node.module or ""
+            top = self._top_module(module)
+            if top and top not in ALLOWED_TOP_MODULES:
+                self.error = f"from '{module}' import not allowed (module: {top})"
+                return
+            self.generic_visit(node)
+
+        def visit_Call(self, node: ast.Call) -> None:
+            # Direct function call: exec(...), eval(...), open(...)
+            if isinstance(node.func, ast.Name):
+                if node.func.id in FORBIDDEN_CALLS:
+                    self.error = f"call to '{node.func.id}' not allowed"
+                    return
+            # Attribute call: builtins.eval(...) etc.
+            elif isinstance(node.func, ast.Attribute):
+                if node.func.attr in FORBIDDEN_CALLS:
+                    self.error = f"call to '{node.func.attr}' not allowed"
+                    return
+            self.generic_visit(node)
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        # Syntax errors are handled upstream; treat as safe here
+        return False, f"SyntaxError during security check: {exc}"
+
+    visitor = _DangerVisitor()
+    visitor.visit(tree)
+    if visitor.error:
+        return False, visitor.error
     return True, ""
 
 
