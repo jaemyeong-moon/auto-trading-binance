@@ -8,7 +8,9 @@ import structlog
 
 from src.core import database as db
 from src.core.auto_optimizer import run_and_save as run_optimizer
+from src.core.config import RiskConfig, TradingConfig
 from src.core.models import SignalType
+from src.core.risk_manager import RiskManager
 from src.exchange.futures_client import FuturesClient
 from src.notifications import webhook
 from src.strategies.base import ExecutionMode, Strategy
@@ -30,6 +32,12 @@ class FuturesEngine:
         self._paper_task: asyncio.Task | None = None  # 독립 가상매매 태스크
         self._paper_trader = None  # lazy init
         self._ai_agent = None  # lazy init
+        _cfg = TradingConfig()
+        _risk_cfg = RiskConfig()
+        self._risk_manager = RiskManager(
+            max_open_positions=_cfg.max_open_positions,
+            max_daily_loss_pct=_risk_cfg.max_daily_loss_pct,
+        )
         self._ai_agent_enabled = bool(
             os.environ.get("ANTHROPIC_API_KEY")
             or os.environ.get("OPENAI_API_KEY")
@@ -602,6 +610,29 @@ class FuturesEngine:
                      invest=f"${invest:.2f}")
 
     async def _open_position(self, symbol: str, direction: str, price: float) -> None:
+        # ── RiskManager: 동시 포지션 수 + 일일 DD 초과 시 진입 차단 ──
+        current_positions = len(db.get_open_positions())
+
+        # 당일 실현 PnL 집계 → 잔고 대비 비율로 환산
+        daily_pnl, _ = db.get_today_pnl()
+        balance_for_dd = await self.client.get_balance()
+        daily_pnl_pct = (daily_pnl / balance_for_dd) if balance_for_dd > 0 else 0.0
+
+        allowed, reason = self._risk_manager.can_open(
+            current_positions=current_positions,
+            daily_pnl_pct=daily_pnl_pct,
+        )
+        if not allowed:
+            logger.warning(
+                "engine.entry_blocked",
+                symbol=symbol,
+                reason=reason,
+                current_positions=current_positions,
+                daily_pnl_pct=f"{daily_pnl_pct:.2%}",
+                max_open_positions=self._risk_manager.max_open_positions,
+            )
+            return
+
         balance = await self.client.get_balance()
 
         # 전략이 정의한 레버리지/투자비율 사용

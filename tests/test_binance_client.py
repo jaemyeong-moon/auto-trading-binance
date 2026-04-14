@@ -477,3 +477,198 @@ class TestErrorHandling:
         fc = FuturesClient()
         # Should not raise even if _client is None
         await fc.disconnect()
+
+
+# ---------------------------------------------------------------------------
+# get_order_book
+# ---------------------------------------------------------------------------
+
+class TestGetOrderBook:
+    async def test_returns_bids_and_asks(self):
+        fc = _connected_client()
+        fc._client.futures_order_book = AsyncMock(return_value={
+            "bids": [["67000.0", "1.5"], ["66999.0", "2.0"]],
+            "asks": [["67001.0", "0.8"], ["67002.0", "1.2"]],
+        })
+
+        result = await fc.get_order_book("BTCUSDT")
+
+        assert "bids" in result
+        assert "asks" in result
+        assert len(result["bids"]) == 2
+        assert len(result["asks"]) == 2
+
+    async def test_prices_and_quantities_are_float(self):
+        fc = _connected_client()
+        fc._client.futures_order_book = AsyncMock(return_value={
+            "bids": [["67000.0", "1.5"]],
+            "asks": [["67001.0", "0.8"]],
+        })
+
+        result = await fc.get_order_book("BTCUSDT")
+
+        bid_price, bid_qty = result["bids"][0]
+        ask_price, ask_qty = result["asks"][0]
+        assert isinstance(bid_price, float)
+        assert isinstance(bid_qty, float)
+        assert isinstance(ask_price, float)
+        assert isinstance(ask_qty, float)
+        assert bid_price == pytest.approx(67000.0)
+        assert ask_qty == pytest.approx(0.8)
+
+    async def test_passes_symbol_and_depth(self):
+        fc = _connected_client()
+        fc._client.futures_order_book = AsyncMock(return_value={"bids": [], "asks": []})
+
+        await fc.get_order_book("ETHUSDT", depth=50)
+
+        fc._client.futures_order_book.assert_awaited_once_with(symbol="ETHUSDT", limit=50)
+
+    async def test_default_depth_is_20(self):
+        fc = _connected_client()
+        fc._client.futures_order_book = AsyncMock(return_value={"bids": [], "asks": []})
+
+        await fc.get_order_book("BTCUSDT")
+
+        call_kwargs = fc._client.futures_order_book.call_args.kwargs
+        assert call_kwargs["limit"] == 20
+
+    async def test_empty_bids_and_asks(self):
+        fc = _connected_client()
+        fc._client.futures_order_book = AsyncMock(return_value={"bids": [], "asks": []})
+
+        result = await fc.get_order_book("BTCUSDT")
+
+        assert result["bids"] == []
+        assert result["asks"] == []
+
+    async def test_raises_on_api_error(self):
+        fc = _connected_client()
+        fc._client.futures_order_book = AsyncMock(side_effect=Exception("API error"))
+
+        with pytest.raises(Exception, match="API error"):
+            await fc.get_order_book("BTCUSDT")
+
+
+# ---------------------------------------------------------------------------
+# get_funding_rate
+# ---------------------------------------------------------------------------
+
+class TestGetFundingRate:
+    async def test_returns_dict_with_expected_keys(self):
+        fc = _connected_client()
+        fc._client.futures_funding_rate = AsyncMock(return_value=[
+            {"symbol": "BTCUSDT", "fundingRate": "0.0001", "fundingTime": 1700000000000},
+        ])
+
+        result = await fc.get_funding_rate("BTCUSDT")
+
+        assert "symbol" in result
+        assert "fundingRate" in result
+        assert "fundingTime" in result
+
+    async def test_funding_rate_is_float(self):
+        fc = _connected_client()
+        fc._client.futures_funding_rate = AsyncMock(return_value=[
+            {"symbol": "BTCUSDT", "fundingRate": "0.0001", "fundingTime": 1700000000000},
+        ])
+
+        result = await fc.get_funding_rate("BTCUSDT")
+
+        assert isinstance(result["fundingRate"], float)
+        assert result["fundingRate"] == pytest.approx(0.0001)
+
+    async def test_funding_time_is_int(self):
+        fc = _connected_client()
+        fc._client.futures_funding_rate = AsyncMock(return_value=[
+            {"symbol": "BTCUSDT", "fundingRate": "0.0001", "fundingTime": 1700000000000},
+        ])
+
+        result = await fc.get_funding_rate("BTCUSDT")
+
+        assert isinstance(result["fundingTime"], int)
+        assert result["fundingTime"] == 1700000000000
+
+    async def test_symbol_matches_input(self):
+        fc = _connected_client()
+        fc._client.futures_funding_rate = AsyncMock(return_value=[
+            {"symbol": "ETHUSDT", "fundingRate": "-0.0003", "fundingTime": 1700000000000},
+        ])
+
+        result = await fc.get_funding_rate("ETHUSDT")
+
+        assert result["symbol"] == "ETHUSDT"
+
+    async def test_negative_funding_rate(self):
+        fc = _connected_client()
+        fc._client.futures_funding_rate = AsyncMock(return_value=[
+            {"symbol": "BTCUSDT", "fundingRate": "-0.00025", "fundingTime": 1700000000000},
+        ])
+
+        result = await fc.get_funding_rate("BTCUSDT")
+
+        assert result["fundingRate"] == pytest.approx(-0.00025)
+
+    async def test_empty_response_returns_defaults(self):
+        fc = _connected_client()
+        fc._client.futures_funding_rate = AsyncMock(return_value=[])
+
+        result = await fc.get_funding_rate("BTCUSDT")
+
+        assert result["symbol"] == "BTCUSDT"
+        assert result["fundingRate"] == 0.0
+        assert result["fundingTime"] == 0
+
+    async def test_raises_on_api_error(self):
+        fc = _connected_client()
+        fc._client.futures_funding_rate = AsyncMock(side_effect=Exception("rate limit"))
+
+        with pytest.raises(Exception, match="rate limit"):
+            await fc.get_funding_rate("BTCUSDT")
+
+
+# ---------------------------------------------------------------------------
+# get_open_interest
+# ---------------------------------------------------------------------------
+
+class TestGetOpenInterest:
+    async def test_returns_float(self):
+        fc = _connected_client()
+        fc._client.futures_open_interest = AsyncMock(return_value={
+            "symbol": "BTCUSDT",
+            "openInterest": "12345.678",
+        })
+
+        oi = await fc.get_open_interest("BTCUSDT")
+
+        assert isinstance(oi, float)
+        assert oi == pytest.approx(12345.678)
+
+    async def test_passes_symbol(self):
+        fc = _connected_client()
+        fc._client.futures_open_interest = AsyncMock(return_value={
+            "symbol": "ETHUSDT",
+            "openInterest": "500.0",
+        })
+
+        await fc.get_open_interest("ETHUSDT")
+
+        fc._client.futures_open_interest.assert_awaited_once_with(symbol="ETHUSDT")
+
+    async def test_large_oi_value(self):
+        fc = _connected_client()
+        fc._client.futures_open_interest = AsyncMock(return_value={
+            "symbol": "BTCUSDT",
+            "openInterest": "999999999.999",
+        })
+
+        oi = await fc.get_open_interest("BTCUSDT")
+
+        assert oi == pytest.approx(999999999.999)
+
+    async def test_raises_on_api_error(self):
+        fc = _connected_client()
+        fc._client.futures_open_interest = AsyncMock(side_effect=Exception("symbol not found"))
+
+        with pytest.raises(Exception, match="symbol not found"):
+            await fc.get_open_interest("BTCUSDT")

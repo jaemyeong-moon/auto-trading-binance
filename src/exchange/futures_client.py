@@ -258,3 +258,41 @@ class FuturesClient:
             "available": float(usdt.get("availableBalance", usdt.get("withdrawAvailable", 0))),
             "unrealized_pnl": float(usdt.get("crossUnPnl", 0)),
         }
+
+    async def get_order_book(self, symbol: str, depth: int = 20) -> dict:
+        """오더북 조회.
+
+        Returns:
+            {"bids": [[price, qty], ...], "asks": [[price, qty], ...]}
+            price와 qty는 float으로 변환됨.
+        """
+        raw = await self.client.futures_order_book(symbol=symbol, limit=depth)
+        return {
+            "bids": [[float(p), float(q)] for p, q in raw.get("bids", [])],
+            "asks": [[float(p), float(q)] for p, q in raw.get("asks", [])],
+        }
+
+    async def get_funding_rate(self, symbol: str) -> dict:
+        """현재 펀딩비 조회.
+
+        Returns:
+            {"symbol": str, "fundingRate": float, "fundingTime": int}
+        """
+        records = await self.client.futures_funding_rate(symbol=symbol, limit=1)
+        if not records:
+            return {"symbol": symbol, "fundingRate": 0.0, "fundingTime": 0}
+        latest = records[-1]
+        return {
+            "symbol": latest["symbol"],
+            "fundingRate": float(latest["fundingRate"]),
+            "fundingTime": int(latest["fundingTime"]),
+        }
+
+    async def get_open_interest(self, symbol: str) -> float:
+        """미결제약정(OI) 조회.
+
+        Returns:
+            float: OI in contracts
+        """
+        raw = await self.client.futures_open_interest(symbol=symbol)
+        return float(raw["openInterest"])

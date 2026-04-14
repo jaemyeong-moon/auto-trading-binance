@@ -212,3 +212,83 @@ class TestDailyDdOk:
         assert mgr.daily_dd_ok(-0.019) is True
         assert mgr.daily_dd_ok(-0.02) is False
         assert mgr.daily_dd_ok(-0.021) is False
+
+
+# ── kelly_size ─────────────────────────────────────────────────────────────────
+
+
+class TestKellySize:
+    """Kelly Criterion 기반 포지션 비율 계산 테스트."""
+
+    def test_standard_case_60pct_win_2to1_ratio(self, rm):
+        """승률 60 %, 평균수익 2 %, 평균손실 1 % → Kelly 40 % × 0.25 = 10 %."""
+        # kelly = 0.60 - (1 - 0.60) / (0.02 / 0.01)
+        #       = 0.60 - 0.40 / 2.0
+        #       = 0.60 - 0.20
+        #       = 0.40
+        # result = 0.40 * 0.25 = 0.10
+        result = rm.kelly_size(win_rate=0.60, avg_win=0.02, avg_loss=0.01)
+        assert result == pytest.approx(0.10)
+
+    def test_negative_kelly_returns_zero(self, rm):
+        """승률 40 %, 손익비 < 1 → Kelly 음수 → 0 % (거래하지 말 것)."""
+        # kelly = 0.40 - 0.60 / (0.005 / 0.01) = 0.40 - 1.20 = -0.80  → 0
+        result = rm.kelly_size(win_rate=0.40, avg_win=0.005, avg_loss=0.01)
+        assert result == 0.0
+
+    def test_cap_at_max_pct(self, rm):
+        """Kelly > max_pct → max_pct 반환."""
+        # kelly = 0.90 - 0.10 / (0.10 / 0.01) = 0.90 - 0.01 = 0.89
+        # result = 0.89 * 0.25 = 0.2225 → capped at max_pct=0.20
+        result = rm.kelly_size(
+            win_rate=0.90, avg_win=0.10, avg_loss=0.01, max_pct=0.20
+        )
+        assert result == pytest.approx(0.20)
+
+    def test_avg_loss_zero_returns_zero(self, rm):
+        """avg_loss = 0 → 0 % (0으로 나누기 방지)."""
+        result = rm.kelly_size(win_rate=0.60, avg_win=0.02, avg_loss=0.0)
+        assert result == 0.0
+
+    def test_safety_factor_zero_returns_zero(self, rm):
+        """안전계수 0 → 0 %."""
+        result = rm.kelly_size(
+            win_rate=0.60, avg_win=0.02, avg_loss=0.01, safety_factor=0.0
+        )
+        assert result == 0.0
+
+    def test_breakeven_kelly_is_zero(self, rm):
+        """Kelly = 0 인 경우 (수학적 손익분기) → 0 % 반환."""
+        # kelly = win_rate - (1 - win_rate) / ratio = 0
+        # win_rate * ratio = 1 - win_rate  →  win_rate * (ratio + 1) = 1
+        # ratio=1, win_rate=0.5: kelly = 0.5 - 0.5 / 1.0 = 0.0
+        result = rm.kelly_size(win_rate=0.50, avg_win=0.01, avg_loss=0.01)
+        assert result == 0.0
+
+    def test_default_max_pct_cap(self, rm):
+        """기본 max_pct(0.25)로 상한이 적용되는지 확인."""
+        # kelly = 0.99 - 0.01 / (10.0 / 0.01) = 0.99 - 0.01/1000 ≈ 0.98999
+        # result = 0.98999 * 0.25 ≈ 0.2475 → under cap
+        # Use safety_factor=1.0 so result = kelly_pct, easily exceeds 0.25
+        # kelly = 0.80 - 0.20 / (2.0 / 1.0) = 0.80 - 0.10 = 0.70
+        # result = 0.70 * 1.0 = 0.70 → capped at 0.25
+        result = rm.kelly_size(
+            win_rate=0.80, avg_win=2.0, avg_loss=1.0,
+            safety_factor=1.0, max_pct=0.25,
+        )
+        assert result == pytest.approx(0.25)
+
+    def test_custom_safety_factor(self, rm):
+        """safety_factor 를 변경하면 결과에 정비례 반영."""
+        # kelly = 0.60 - 0.40 / 2.0 = 0.40
+        result_half = rm.kelly_size(
+            win_rate=0.60, avg_win=0.02, avg_loss=0.01,
+            safety_factor=0.50, max_pct=1.0,
+        )
+        # 0.40 * 0.50 = 0.20
+        assert result_half == pytest.approx(0.20)
+
+    def test_result_never_negative(self, rm):
+        """어떤 입력에도 결과는 0 이상이어야 한다."""
+        result = rm.kelly_size(win_rate=0.10, avg_win=0.001, avg_loss=0.50)
+        assert result >= 0.0

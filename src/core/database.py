@@ -294,6 +294,23 @@ def get_position(symbol: str) -> PositionRecord | None:
 
 # ─── Trade helpers ─────────────────────────────────────────
 
+def get_today_pnl() -> tuple[float, int]:
+    """오늘(KST 기준) 청산된 거래의 PnL 합계와 거래 건수를 반환.
+
+    Returns:
+        (total_pnl, trade_count) — 거래가 없으면 (0.0, 0).
+    """
+    today_start = now_kst().replace(hour=0, minute=0, second=0, microsecond=0)
+    with get_session() as session:
+        rows = (
+            session.query(TradeRecord)
+            .filter(TradeRecord.closed_at >= today_start)
+            .all()
+        )
+    total = sum((r.pnl or 0.0) for r in rows)
+    return total, len(rows)
+
+
 def get_trades(symbol: str | None = None, limit: int = 100) -> list[TradeRecord]:
     with get_session() as session:
         q = session.query(TradeRecord).order_by(TradeRecord.closed_at.desc())

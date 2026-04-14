@@ -95,6 +95,48 @@ class RiskManager:
 
         return base_size
 
+    def kelly_size(
+        self,
+        win_rate: float,
+        avg_win: float,
+        avg_loss: float,
+        safety_factor: float = 0.25,
+        max_pct: float = 0.25,
+    ) -> float:
+        """Kelly Criterion 기반 최적 포지션 비율.
+
+        Kelly 공식:
+            kelly_pct = win_rate - (1 - win_rate) / (avg_win / avg_loss)
+
+        실제 적용:
+            result = kelly_pct * safety_factor
+            result = min(result, max_pct)
+            result = max(result, 0.0)   # 음수 Kelly → 0 (거래하지 말 것)
+
+        Args:
+            win_rate: 전략 승률 (0.0 – 1.0).
+            avg_win: 이기는 거래의 평균 수익률 (양수, e.g. 0.02 = 2 %).
+            avg_loss: 지는 거래의 평균 손실률 (양수, e.g. 0.01 = 1 %).
+            safety_factor: Kelly 값에 곱하는 안전계수 (기본 0.25 = 1/4 Kelly).
+            max_pct: 결과 상한 (기본 0.25 = 25 %).
+
+        Returns:
+            권장 포지션 비율 (0.0 – max_pct).
+            avg_loss == 0 또는 safety_factor == 0 이면 0.0 반환.
+        """
+        if avg_loss <= 0.0 or safety_factor <= 0.0:
+            return 0.0
+
+        win_loss_ratio = avg_win / avg_loss
+        kelly_pct = win_rate - (1.0 - win_rate) / win_loss_ratio
+
+        # 음수 Kelly → 기댓값 마이너스, 포지션 진입 금지
+        if kelly_pct <= 0.0:
+            return 0.0
+
+        result = kelly_pct * safety_factor
+        return min(result, max_pct)
+
     def daily_dd_ok(self, daily_pnl_pct: float) -> bool:
         """Return True if today's loss has not exceeded the daily limit.
 
