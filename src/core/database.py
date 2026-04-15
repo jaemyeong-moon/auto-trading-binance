@@ -529,6 +529,15 @@ _DEFAULT_SETTINGS = {
     "ai_agent_interval": "120",
     "ai_agent_last_run": "",
     "ai_agent_last_strategy": "",
+    # ── 페이퍼 승률 기반 자동 스위칭 (Phase 18) ──
+    "paper_selector_enabled": "true",     # 자동 선택 활성화
+    "paper_selector_min_trades": "10",    # 최소 거래 수 (샘플 신뢰도)
+    "paper_selector_min_winrate": "0.50", # 최소 승률 임계값
+    "paper_selector_min_net_pnl": "0",    # 최소 순손익 (USDT) — 음수면 전략 실격
+    "trading_paused": "false",            # 모든 전략 실격 시 true로 설정
+    "trading_paused_reason": "",          # 정지 사유 기록
+    "paper_selector_last_run": "",        # 최근 실행 시각
+    "paper_selector_last_pick": "",       # 최근 선정 전략명
 }
 
 
@@ -646,6 +655,42 @@ def get_trail(trade_type: str, trade_id: int) -> list[dict]:
             "price": r.price,
             "pct": r.progress_pct,
         } for r in rows]
+
+
+# ─── Paper strategy stats (자동 스위칭용) ────────────────
+
+def get_paper_strategy_stats(min_trades: int = 10) -> list[dict]:
+    """모든 페이퍼 전략의 성과 지표 반환.
+
+    - balance, initial_balance, total_trades, wins, losses
+    - winrate = wins / total_trades (0~1)
+    - net_pnl = balance - initial_balance
+    - net_pnl_pct = net_pnl / initial_balance
+    - eligible = total_trades >= min_trades
+    """
+    with get_session() as session:
+        rows = session.query(PaperBalance).all()
+        result = []
+        for r in rows:
+            total = r.total_trades or 0
+            wins = r.wins or 0
+            losses = r.losses or 0
+            winrate = (wins / total) if total > 0 else 0.0
+            net_pnl = (r.balance or 0.0) - (r.initial_balance or 0.0)
+            net_pnl_pct = (net_pnl / r.initial_balance) if r.initial_balance else 0.0
+            result.append({
+                "strategy": r.strategy,
+                "balance": r.balance,
+                "initial_balance": r.initial_balance,
+                "total_trades": total,
+                "wins": wins,
+                "losses": losses,
+                "winrate": winrate,
+                "net_pnl": net_pnl,
+                "net_pnl_pct": net_pnl_pct,
+                "eligible": total >= min_trades,
+            })
+        return result
 
 
 # ─── Signal Log helpers ──────────────────────────────────

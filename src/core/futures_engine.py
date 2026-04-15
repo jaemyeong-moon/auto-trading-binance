@@ -18,6 +18,16 @@ from src.strategies.registry import get_strategy
 
 logger = structlog.get_logger()
 
+# 실거래 수수료/슬리피지 추정 (왕복 비용 — 수수료 가드 하한 계산용)
+# 바이낸스 선물 taker 0.04% × 2 + 슬리피지 0.02% × 2 = 0.12%
+LIVE_FEE_RATE = 0.0004
+LIVE_SLIPPAGE_RATE = 0.0002
+LIVE_TOTAL_COST_RATE = (LIVE_FEE_RATE + LIVE_SLIPPAGE_RATE) * 2  # 0.0012
+MIN_TP_COST_MULT = 5.0
+MIN_TP_PCT = LIVE_TOTAL_COST_RATE * MIN_TP_COST_MULT  # 0.006 = 0.6%
+# 전략 선택 주기 (틱 기준, 30초 × 40 = 20분)
+STRATEGY_SELECT_INTERVAL_TICKS = 40
+
 # AI Agent 실행 주기 (틱 수 기준, 기본 tick=30초 × 120 = 약 1시간)
 AI_AGENT_INTERVAL_TICKS = 120
 
@@ -154,6 +164,11 @@ class FuturesEngine:
                 if tick_count % 20 == 0:
                     await self.client.sync_time()
 
+                # Phase 18: 페이퍼 승률 기반 자동 전략 스위칭
+                # (AI Agent 호출 전에 먼저 — 빠른 승자로 스왑된 후 AI 분석하도록)
+                if tick_count % STRATEGY_SELECT_INTERVAL_TICKS == 5:
+                    self._run_paper_selector(symbol)
+
                 # AI Agent: 주기적으로 전략 성과 분석 및 신규 전략 생성
                 if self._ai_agent_enabled and tick_count % AI_AGENT_INTERVAL_TICKS == 1:
                     await self._run_ai_agent(symbol)
@@ -216,6 +231,25 @@ class FuturesEngine:
             except Exception:
                 logger.exception("paper.loop_error")
             await asyncio.sleep(tick_interval)
+
+    def _run_paper_selector(self, symbol: str) -> None:
+        """페이퍼 승률 기반 최적 전략 선정 → DB strategy 설정 갱신.
+
+        실제 스왑은 _check_hot_reload가 감지해서 처리.
+        모든 전략 실격이면 trading_paused=true로 설정되며
+        _open_position에서 가드.
+        """
+        try:
+            from src.core.paper_selector import select_and_apply
+            result = select_and_apply()
+            if result["action"] == "switched":
+                logger.info(
+                    "engine.paper_selector_switched",
+                    symbol=symbol,
+                    new_strategy=result["strategy"],
+                )
+        except Exception:
+            logger.exception("engine.paper_selector_failed", symbol=symbol)
 
     async def _run_ai_agent(self, symbol: str) -> None:
         """AI Agent 실행: 성과 분석 → 필요 시 신규 전략 생성 → 핫 스왑."""
@@ -510,6 +544,10 @@ class FuturesEngine:
             tp_pct = db.get_setting_float("tp_pct")
             sl_pct = db.get_setting_float("sl_pct")
 
+        # 수수료 커버 하한 강제 — TP가 수수료도 못 넘으면 의미없는 익절
+        if tp_pct < MIN_TP_PCT:
+            tp_pct = MIN_TP_PCT
+
         # 궤적 기록
         if pos:
             self._record_trail(symbol, pos, price)
@@ -653,6 +691,15 @@ class FuturesEngine:
             trail_dist = getattr(strategy, "TRAILING_DISTANCE_PCT", 0.003)
             sl = getattr(strategy, "SL_PCT", db.get_setting_float("sl_pct"))
 
+        # ── 수수료 가드: TP·부분익절·트레일링 활성화가 수수료 하한보다 작으면 끌어올림 ──
+        # 수수료보다 많이 벌기 전에 청산 방지 (사용자 요구: "수수료 이상 벌 때까지 빠지지 말라")
+        if full_tp < MIN_TP_PCT:
+            full_tp = MIN_TP_PCT
+        if partial_tp > 0 and partial_tp < MIN_TP_PCT:
+            partial_tp = MIN_TP_PCT
+        if trail_activate > 0 and trail_activate < MIN_TP_PCT:
+            trail_activate = MIN_TP_PCT
+
         # ── 손절 ──
         if change <= -sl:
             logger.info("engine.sl_v2", symbol=symbol, change=f"{change:.3%}")
@@ -767,6 +814,15 @@ class FuturesEngine:
                      invest=f"${invest:.2f}")
 
     async def _open_position(self, symbol: str, direction: str, price: float) -> None:
+        # ── Phase 18 거래 정지 가드: 페이퍼 selector가 모든 전략 실격 판정 시 ──
+        if db.get_setting("trading_paused") == "true":
+            reason = db.get_setting("trading_paused_reason") or "paused_by_selector"
+            logger.warning(
+                "engine.entry_blocked_paused",
+                symbol=symbol, direction=direction, reason=reason,
+            )
+            return
+
         # ── RiskManager: 동시 포지션 수 + 일일 DD 초과 시 진입 차단 ──
         current_positions = len(db.get_open_positions())
 
@@ -920,7 +976,11 @@ class FuturesEngine:
     def _calc_sl_tp(
         self, direction: str, entry_price: float, strategy: Strategy,
     ) -> tuple[float, float]:
-        """SL/TP 가격 계산. (sl_price, tp_price) 반환."""
+        """SL/TP 가격 계산. (sl_price, tp_price) 반환.
+
+        TP 거리는 왕복 수수료+슬리피지의 MIN_TP_COST_MULT배를 하한으로 강제 —
+        수수료보다 더 벌기 전에 TP로 빠지는 구조를 막음.
+        """
         state = getattr(strategy, "state", None)
 
         if state and hasattr(state, "sl_price") and getattr(state, "sl_price", 0) > 0:
@@ -938,6 +998,17 @@ class FuturesEngine:
             tp_pct = db.get_setting_float("tp_pct") or 0.01
             sl_dist = entry_price * sl_pct
             tp_dist = entry_price * tp_pct
+
+        # ── 수수료 커버 하한 ──
+        min_tp_dist = entry_price * MIN_TP_PCT
+        if tp_dist < min_tp_dist:
+            logger.warning(
+                "engine.tp_below_fee_floor",
+                direction=direction, raw_tp_pct=round(tp_dist / entry_price * 100, 4),
+                floor_pct=round(MIN_TP_PCT * 100, 4),
+                strategy=getattr(strategy, "name", "?"),
+            )
+            tp_dist = min_tp_dist
 
         if direction == "LONG":
             return entry_price - sl_dist, entry_price + tp_dist

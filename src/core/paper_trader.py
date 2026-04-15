@@ -28,6 +28,11 @@ POSITION_PCT = 1.0            # 잔고 100% 투자
 FEE_RATE = 0.0004             # 편도 0.04% (메이커/테이커 평균)
 SLIPPAGE_RATE = 0.0002        # 슬리피지 0.02%
 TOTAL_COST_RATE = (FEE_RATE + SLIPPAGE_RATE) * 2  # 왕복 총 비용 0.12%
+# TP 최소 거리: 왕복 수수료 + 슬리피지의 N배 이상이어야 진입 허용.
+# 0.12% × 5 = 0.6% → TP 히트 시 최소 약 0.48% 순이익 보장.
+# "수수료보다 더 벌 때까지 빠지지 말라" 요구사항에 대응.
+MIN_TP_COST_MULT = 5.0
+MIN_TP_PCT = TOTAL_COST_RATE * MIN_TP_COST_MULT  # 0.006 = 0.6%
 SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 
 
@@ -230,6 +235,19 @@ class PaperTrader:
         else:
             sl_dist = price * 0.005
             tp_dist = price * 0.01
+
+        # ── 수수료 커버 가드 ──
+        # TP 거리가 왕복 비용의 MIN_TP_COST_MULT배 미만이면,
+        # 히트돼도 수수료 떼고 나면 거의 안 남음 → 진입 자체 스킵.
+        min_tp_dist = price * MIN_TP_PCT
+        if tp_dist < min_tp_dist:
+            logger.info(
+                "paper.skip_entry_fee_guard",
+                strategy=name, symbol=symbol,
+                tp_dist_pct=round(tp_dist / price * 100, 4),
+                min_tp_pct=round(MIN_TP_PCT * 100, 4),
+            )
+            return
 
         if side == "LONG":
             sl_price = price - sl_dist
