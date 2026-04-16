@@ -143,6 +143,11 @@ def mock_futures_client() -> AsyncMock:
     # Fees
     client.get_recent_fees = AsyncMock(return_value=0.05)
 
+    # Derivatives data (v13 OrderFlow 등에서 사용)
+    client.get_order_book = AsyncMock(return_value={"bids": [], "asks": []})
+    client.get_funding_rate = AsyncMock(return_value={"fundingRate": 0.0001})
+    client.get_open_interest = AsyncMock(return_value=100000.0)
+
     return client
 
 

@@ -51,6 +51,8 @@ def _register_all():
     from src.strategies import data_driven_scalper  # noqa: F401
     from src.strategies import pattern_scalper  # noqa: F401
     from src.strategies import orderflow_v13  # noqa: F401
+    from src.strategies import vwap_reversion  # noqa: F401
+    from src.strategies import volatility_breakout  # noqa: F401
     # 역신호 래퍼는 원본들이 먼저 등록된 후에 임포트되어야 한다
     from src.strategies import reverse_wrapper  # noqa: F401
 

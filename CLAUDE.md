@@ -12,14 +12,14 @@ Automated cryptocurrency trading bot for Binance. Python 3.11+, async-first arch
 # Install
 pip install -e ".[dev]"           # core + dev tools
 pip install -e ".[ml]"            # ML dependencies (torch, xgboost, optuna)
-pip install -e ".[dashboard]"     # streamlit + plotly
+pip install -e ".[dashboard]"     # fastapi + uvicorn (mobile dashboard)
 pip install -e ".[dev,ml,dashboard]"  # everything
 
 # Run
 python -m src.main                # or: auto-trader (after install)
 
-# Dashboard
-streamlit run src/dashboard/app.py
+# Mobile Dashboard
+python -m src.dashboard.mobile    # FastAPI 모바일 대시보드 (port 8502)
 
 # Test
 pytest                         # all tests
@@ -47,7 +47,7 @@ The trading loop follows a pipeline: **Exchange -> Strategy -> Signal -> Engine 
 - **`src/strategies/combined.py`** — Weighted merge of technical (0.4) and ML (0.6) scores. Threshold of ±0.3 for action.
 - **`src/backtesting/backtest.py`** — `Backtester.run(symbol, candles) -> BacktestResult`. Simulates strategy with commission, stop-loss/take-profit, and produces equity curve + trade list.
 - **`src/notifications/notifier.py`** — `TelegramNotifier` (requires bot token + chat ID) and `ConsoleNotifier` fallback. Both implement `notify_signal()` and `notify_trade()`.
-- **`src/dashboard/app.py`** — Streamlit dashboard with 3 pages: 실시간 현황, 백테스팅, 거래 내역. Run with `streamlit run src/dashboard/app.py`.
+- **`src/dashboard/mobile.py`** — FastAPI 모바일 대시보드 (PWA). 실시간 현황, 거래 내역, 설정, 전략 판단 로그 등. `python -m src.dashboard.mobile`로 실행.
 - **`src/core/database.py`** — SQLAlchemy trade persistence. `TradeRecord` table, `save_trade()` helper, `init_db()` to create tables.
 
 ## Configuration

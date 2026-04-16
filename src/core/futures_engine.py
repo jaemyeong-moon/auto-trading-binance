@@ -59,6 +59,7 @@ class FuturesEngine:
         self._paper_task: asyncio.Task | None = None  # 독립 가상매매 태스크
         self._paper_trader = None  # lazy init
         self._ai_agent = None  # lazy init
+        self._prev_oi: dict[str, float] = {}  # OI 이전값 (v13 데이터 주입용)
         _cfg = TradingConfig()
         _risk_cfg = RiskConfig()
         self._risk_manager = RiskManager(
@@ -220,6 +221,8 @@ class FuturesEngine:
                     htf = await self.client.get_candles(
                         symbol, interval="1h", limit=100)
                     if not candles_15m.empty:
+                        # 페이퍼 전략에도 파생상품 데이터 주입 (v13 등)
+                        await self._inject_derivatives_data(symbol, candles_15m)
                         candles_map[symbol] = candles_15m
                     if not htf.empty:
                         htf_map[symbol] = htf
@@ -509,7 +512,33 @@ class FuturesEngine:
 
         candles = await self.client.get_candles(symbol, interval=primary_tf, limit=200)
         htf_candles = await self.client.get_candles(symbol, interval=htf_tf, limit=250)
+
+        # v13(OrderFlow) 등이 필요로 하는 파생상품 데이터를 candles.attrs에 주입
+        await self._inject_derivatives_data(symbol, candles)
+
         return candles, htf_candles
+
+    async def _inject_derivatives_data(self, symbol: str, candles: pd.DataFrame) -> None:
+        """오더북/펀딩비/OI 데이터를 candles.attrs에 주입 (v13 등에서 사용)."""
+        try:
+            ob = await self.client.get_order_book(symbol, depth=20)
+            candles.attrs["orderbook"] = ob
+        except Exception:
+            logger.debug("engine.orderbook_fetch_failed", symbol=symbol)
+
+        try:
+            fr = await self.client.get_funding_rate(symbol)
+            candles.attrs["funding_rates"] = [fr["fundingRate"]]
+        except Exception:
+            logger.debug("engine.funding_rate_fetch_failed", symbol=symbol)
+
+        try:
+            oi = await self.client.get_open_interest(symbol)
+            candles.attrs["oi_current"] = oi
+            candles.attrs["oi_prev"] = self._prev_oi.get(symbol, oi)
+            self._prev_oi[symbol] = oi
+        except Exception:
+            logger.debug("engine.oi_fetch_failed", symbol=symbol)
 
     def _record_trail(self, symbol: str, pos: dict, price: float) -> None:
         """실거래 포지션 궤적 기록."""

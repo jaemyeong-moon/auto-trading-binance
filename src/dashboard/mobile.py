@@ -297,6 +297,45 @@ async def api_strategies(request: Request):
     return JSONResponse(strategies)
 
 
+@app.post("/api/strategy/manual")
+async def api_strategy_manual(request: Request):
+    """수동 전략 선택 — paper_selector 비활성화 후 지정 전략으로 강제 변경."""
+    if err := _auth_guard(request): return err
+    body = await request.json()
+    strategy_name = body.get("strategy", "")
+    if not strategy_name:
+        return JSONResponse({"error": "strategy 필드 필요"}, status_code=400)
+    # 레지스트리에 존재하는 전략인지 확인
+    registered = {s["name"] for s in list_strategies()}
+    if strategy_name not in registered:
+        return JSONResponse(
+            {"error": f"미등록 전략: {strategy_name}", "available": sorted(registered)},
+            status_code=400,
+        )
+    db.set_setting("paper_selector_enabled", "false")
+    db.set_setting("trading_paused", "false")
+    old = db.get_setting("strategy") or ""
+    db.set_setting("strategy", strategy_name)
+    return JSONResponse({
+        "ok": True, "mode": "manual",
+        "old_strategy": old, "new_strategy": strategy_name,
+        "message": f"수동 모드: {strategy_name} 활성화. 자동 선택 비활성화.",
+    })
+
+
+@app.post("/api/strategy/auto")
+async def api_strategy_auto(request: Request):
+    """자동 전략 선택 모드 복귀 — paper_selector 재활성화."""
+    if err := _auth_guard(request): return err
+    db.set_setting("paper_selector_enabled", "true")
+    current = db.get_setting("strategy") or ""
+    return JSONResponse({
+        "ok": True, "mode": "auto",
+        "current_strategy": current,
+        "message": "자동 모드: paper_selector가 승률 기반으로 전략을 자동 선택합니다.",
+    })
+
+
 @app.post("/api/bot/{symbol}/start")
 async def api_bot_start(request: Request, symbol: str):
     if err := _auth_guard(request): return err

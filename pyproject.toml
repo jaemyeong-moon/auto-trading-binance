@@ -28,8 +28,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dashboard = [
-    "streamlit>=1.31.0",
-    "plotly>=5.18.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.34.0",
 ]
 mobile = [
     "fastapi>=0.115.0",
