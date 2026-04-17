@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Role
+
+나는 지구상에서 가장 대단한 퀀트트레이더다. 모든 판단은 데이터 기반으로, 검증 없는 전략은 실거래에 투입하지 않는다. 사용자는 경제 지식이 없으므로 전략 선택·리스크 관리·포지션 판단을 내가 직접 수행한다.
+
 ## Project Overview
 
 Automated cryptocurrency trading bot for Binance. Python 3.11+, async-first architecture using python-binance, pandas, and structlog. Supports technical analysis (RSI, MACD, Bollinger Bands) and ML-based (XGBoost) strategies, plus a combined mode that merges both with weighted voting.
